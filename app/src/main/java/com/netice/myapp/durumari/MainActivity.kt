@@ -14,6 +14,8 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.media.AudioAttributes
+import android.media.SoundPool
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -29,7 +31,6 @@ import android.view.HapticFeedbackConstants
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
-import android.view.SoundEffectConstants
 import android.view.View
 import android.view.ViewGroup
 import android.view.animation.AccelerateDecelerateInterpolator
@@ -68,12 +69,17 @@ import com.netice.myapp.durumari.ui.DurumariRootLayer
 import com.netice.myapp.durumari.ui.ReaderCanvasView
 import com.netice.myapp.durumari.ui.ScrollArtworkView
 import com.netice.myapp.durumari.ui.ThemeTokens
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.max
+import kotlin.math.pow
 import kotlin.math.roundToInt
+import kotlin.math.sin
+import kotlin.random.Random
 
 class MainActivity : Activity() {
     private enum class MainTab(val label: String, val searchHint: String) {
@@ -86,6 +92,20 @@ class MainActivity : Activity() {
         NONE,
         TRACK,
         MARKER,
+    }
+
+    private enum class SyntheticSound {
+        PAGE_PREVIOUS,
+        PAGE_NEXT,
+        UI_OPEN,
+        UI_CLOSE,
+        UI_PRESS,
+    }
+
+    private enum class UiFeedbackKind {
+        OPEN,
+        CLOSE,
+        PRESS,
     }
 
     private data class MainSortOption(
@@ -106,6 +126,7 @@ class MainActivity : Activity() {
     )
 
     private val handler = Handler(Looper.getMainLooper())
+    private val soundPlayer = SyntheticSoundPlayer()
     private var scrollAnimator: ValueAnimator? = null
     private var settings: ReaderSettings = DurumariDefaults.readerSettings()
     private lateinit var settingsStore: LocalSettingsStore
@@ -163,6 +184,7 @@ class MainActivity : Activity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             window.setDecorFitsSystemWindows(false)
         }
+        initializeSyntheticSounds()
         appTypeface = loadTypeface()
         settingsStore = LocalSettingsStore(this)
         settings = normalizeReaderSettings(settingsStore.load())
@@ -210,6 +232,7 @@ class MainActivity : Activity() {
         handler.removeCallbacksAndMessages(null)
         stopScrollAnimation()
         unregisterBackInvokedCallback()
+        soundPlayer.release()
         if (::appStore.isInitialized) appStore.close()
         super.onDestroy()
     }
@@ -310,10 +333,12 @@ class MainActivity : Activity() {
 
     private fun handleViewerBack(): Boolean {
         if (rootLayer?.isOverlayVisible == true) {
+            playUiFeedback(UiFeedbackKind.CLOSE)
             rootLayer?.dismissOverlay()
             return true
         }
         if (activeDocument != null || activePages.isNotEmpty()) {
+            playUiFeedback(UiFeedbackKind.CLOSE)
             closeViewerToMain()
             return true
         }
@@ -445,6 +470,7 @@ class MainActivity : Activity() {
         configureSystemBars(theme)
         rootLayer = DurumariRootLayer(this).apply {
             applyTheme(theme)
+            onUserDismissOverlay = { playUiFeedback(UiFeedbackKind.CLOSE) }
             onInsetsChanged = { top, bottom ->
                 safeTopInset = top
                 safeBottomInset = bottom
@@ -466,6 +492,7 @@ class MainActivity : Activity() {
 
         rootLayer = DurumariRootLayer(this).apply {
             applyTheme(theme)
+            onUserDismissOverlay = { playUiFeedback(UiFeedbackKind.CLOSE) }
             onInsetsChanged = { top, bottom ->
                 safeTopInset = top
                 safeBottomInset = bottom
@@ -583,6 +610,7 @@ class MainActivity : Activity() {
             animateMainTabSwipe(host, currentView, tabs[next], delta)
             return
         }
+        playUiFeedback(UiFeedbackKind.PRESS)
         activeTab = tabs[next]
         showMainScreen()
     }
@@ -594,6 +622,7 @@ class MainActivity : Activity() {
         delta: Int,
     ) {
         if (mainTabAnimating) return
+        playUiFeedback(UiFeedbackKind.PRESS)
         mainTabAnimating = true
         val theme = DurumariThemes.tokens(settings.theme)
         val direction = if (delta > 0) 1 else -1
@@ -683,10 +712,11 @@ class MainActivity : Activity() {
             ).apply {
                 minHeight = dp(34)
                 background = roundedRect(if (active) theme.accent else Color.TRANSPARENT, 10)
-                isClickable = true
-                setOnClickListener {
-                    activeTab = tab
-                    showMainScreen()
+                setUiClickListener {
+                    if (activeTab != tab) {
+                        activeTab = tab
+                        showMainScreen()
+                    }
                 }
             }
             tabs.addView(item, LinearLayout.LayoutParams(0, dp(34), 1f).apply {
@@ -699,8 +729,7 @@ class MainActivity : Activity() {
             minWidth = dp(44)
             minHeight = dp(44)
             background = roundedRect(theme.card, 14, strokeColor = theme.border)
-            isClickable = true
-            setOnClickListener { showSettingsOverlay() }
+            setUiClickListener(UiFeedbackKind.OPEN) { showSettingsOverlay() }
         }
 
         row.addView(tabs, LinearLayout.LayoutParams(0, dp(44), 1f))
@@ -729,8 +758,7 @@ class MainActivity : Activity() {
             }, linear(wrap, dp(30)))
             chip.addView(text("×", theme.accentForeground, 16f, bold = true, gravity = Gravity.CENTER).apply {
                 background = roundedRect(Color.argb(61, 255, 255, 255), 10)
-                isClickable = true
-                setOnClickListener {
+                setUiClickListener {
                     appStore.removeFolder(activeFolder.folderId)
                     clearViewerResume()
                     settings = settings.copy(activeFolderId = null)
@@ -746,8 +774,7 @@ class MainActivity : Activity() {
             minHeight = dp(36)
             setPadding(dp(12), 0, dp(12), 0)
             background = roundedRect(theme.card, 14, strokeColor = theme.border)
-            isClickable = true
-            setOnClickListener { openFolderPicker() }
+            setUiClickListener(UiFeedbackKind.OPEN) { openFolderPicker() }
         }
         row.addView(addFolder, linear(wrap, dp(36), left = if (activeFolder != null) 8 else 0))
         return row
@@ -806,8 +833,7 @@ class MainActivity : Activity() {
                     gravity = Gravity.CENTER,
                 ).apply {
                     background = roundedRect(if (active) theme.accent else Color.TRANSPARENT, 0)
-                    isClickable = true
-                    setOnClickListener {
+                    setUiClickListener {
                         updateMainSort(activeTab, nextSortConfig(activeTab, option.column))
                         showMainScreen()
                     }
@@ -1068,10 +1094,10 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(14), dp(14), dp(14), dp(14))
             background = roundedRect(theme.card, 14, strokeColor = theme.border)
-            isClickable = true
-            setOnClickListener {
-                if (System.currentTimeMillis() - lastMainSwipeAt < 500L) return@setOnClickListener
-                onOpen?.invoke()
+            setUiClickListener(UiFeedbackKind.OPEN) {
+                if (System.currentTimeMillis() - lastMainSwipeAt >= 500L) {
+                    onOpen?.invoke()
+                }
             }
         }
         attachMainListCardTouch(card, onLongPress)
@@ -1134,10 +1160,10 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(14), dp(14), dp(14), dp(14))
             background = roundedRect(theme.card, 14, strokeColor = theme.border)
-            isClickable = true
-            setOnClickListener {
-                if (System.currentTimeMillis() - lastMainSwipeAt < 500L) return@setOnClickListener
-                onOpen?.invoke()
+            setUiClickListener(UiFeedbackKind.OPEN) {
+                if (System.currentTimeMillis() - lastMainSwipeAt >= 500L) {
+                    onOpen?.invoke()
+                }
             }
         }
         attachBookmarkCardTouch(card, onDeleteRequest)
@@ -1192,7 +1218,6 @@ class MainActivity : Activity() {
                         longPressRunnable = Runnable {
                             longPressFired = true
                             consumed = true
-                            view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
                             onDeleteRequest.invoke()
                         }.also { handler.postDelayed(it, 520L) }
                     }
@@ -1246,6 +1271,7 @@ class MainActivity : Activity() {
     }
 
     private fun showDeleteReadingDialog(theme: ThemeTokens, reading: ReadingRecord, documentTitle: String) {
+        playUiFeedback(UiFeedbackKind.OPEN)
         val dialog = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(18), dp(20), dp(18))
@@ -1266,13 +1292,11 @@ class MainActivity : Activity() {
         }
         actions.addView(text("아니오", theme.text, 15f, bold = true, gravity = Gravity.CENTER).apply {
             background = roundedRect(theme.bg, 12, strokeColor = theme.border)
-            isClickable = true
-            setOnClickListener { rootLayer?.dismissOverlay() }
+            setUiClickListener(UiFeedbackKind.CLOSE) { rootLayer?.dismissOverlay() }
         }, LinearLayout.LayoutParams(0, dp(44), 1f))
         actions.addView(text("예", theme.accentForeground, 15f, bold = true, gravity = Gravity.CENTER).apply {
             background = roundedRect(theme.accent, 12)
-            isClickable = true
-            setOnClickListener {
+            setUiClickListener {
                 appStore.removeReading(reading.documentId)
                 readingsById = readingsById - reading.documentId
                 bookmarks = bookmarks.filterNot { it.documentId == reading.documentId }
@@ -1291,6 +1315,7 @@ class MainActivity : Activity() {
     }
 
     private fun showDeleteBookmarkDialog(theme: ThemeTokens, bookmark: BookmarkRecord, documentTitle: String) {
+        playUiFeedback(UiFeedbackKind.OPEN)
         val dialog = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(18), dp(20), dp(18))
@@ -1309,13 +1334,11 @@ class MainActivity : Activity() {
         }
         actions.addView(text("아니오", theme.text, 15f, bold = true, gravity = Gravity.CENTER).apply {
             background = roundedRect(theme.bg, 12, strokeColor = theme.border)
-            isClickable = true
-            setOnClickListener { rootLayer?.dismissOverlay() }
+            setUiClickListener(UiFeedbackKind.CLOSE) { rootLayer?.dismissOverlay() }
         }, LinearLayout.LayoutParams(0, dp(44), 1f))
         actions.addView(text("예", theme.accentForeground, 15f, bold = true, gravity = Gravity.CENTER).apply {
             background = roundedRect(theme.accent, 12)
-            isClickable = true
-            setOnClickListener {
+            setUiClickListener {
                 appStore.removeBookmark(bookmark.bookmarkId)
                 bookmarks = bookmarks.filterNot { it.bookmarkId == bookmark.bookmarkId }
                 rootLayer?.dismissOverlay()
@@ -1637,7 +1660,6 @@ class MainActivity : Activity() {
                             longPressShown = true
                             longPressRunnable = null
                             view.parent?.requestDisallowInterceptTouchEvent(false)
-                            view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
                             showViewerMenuSheet(theme)
                         }
                     }.also { handler.postDelayed(it, 560L) }
@@ -1709,7 +1731,7 @@ class MainActivity : Activity() {
         val next = (activePageIndex + delta).coerceIn(0, total - 1)
         if (next == activePageIndex) {
             if (delta != 0) {
-                playPageTurnFeedback(feedbackView)
+                playPageTurnFeedback(feedbackView, previous = delta < 0)
                 (feedbackView as? ReaderCanvasView)?.startBoundaryBounce(delta, axis)
                 Toast.makeText(
                     this,
@@ -1721,7 +1743,7 @@ class MainActivity : Activity() {
         }
         val canvas = feedbackView as? ReaderCanvasView
         activePageIndex = next
-        playPageTurnFeedback(feedbackView)
+        playPageTurnFeedback(feedbackView, previous = delta < 0)
         if (canvas != null) {
             canvas.startPageTransition(
                 toText = pageTextForPage(activePageIndex),
@@ -1739,15 +1761,290 @@ class MainActivity : Activity() {
         return true
     }
 
-    private fun playPageTurnFeedback(target: View?) {
+    private fun playPageTurnFeedback(target: View?, previous: Boolean) {
         when (settings.pageTurnFeedback) {
             PageTurnFeedback.NONE -> Unit
             PageTurnFeedback.VIBRATION -> target?.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
-            PageTurnFeedback.SOUND -> target?.playSoundEffect(SoundEffectConstants.CLICK)
+            PageTurnFeedback.SOUND -> playSyntheticPageTurnSound(previous)
+        }
+    }
+
+    private fun playUiFeedback(kind: UiFeedbackKind, target: View? = rootLayer ?: window.decorView) {
+        when (settings.pageTurnFeedback) {
+            PageTurnFeedback.NONE -> Unit
+            PageTurnFeedback.VIBRATION -> target?.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+            PageTurnFeedback.SOUND -> playSyntheticUiSound(kind)
+        }
+    }
+
+    private fun dismissOverlayWithFeedback() {
+        playUiFeedback(UiFeedbackKind.CLOSE)
+        rootLayer?.dismissOverlay()
+    }
+
+    private fun View.setUiClickListener(kind: UiFeedbackKind = UiFeedbackKind.PRESS, action: () -> Unit) {
+        isClickable = true
+        setOnClickListener {
+            playUiFeedback(kind, this)
+            action()
+        }
+    }
+
+    private fun initializeSyntheticSounds() {
+        soundPlayer.prepare(
+            mapOf(
+                SyntheticSound.PAGE_PREVIOUS to createPageTurnSoundSamples(
+                    previous = true,
+                    durationSeconds = PAGE_TURN_PREVIOUS_SOUND_SECONDS,
+                ),
+                SyntheticSound.PAGE_NEXT to createPageTurnSoundSamples(
+                    previous = false,
+                    durationSeconds = PAGE_TURN_NEXT_SOUND_SECONDS,
+                ),
+                SyntheticSound.UI_OPEN to createUiOpenSoundSamples(),
+                SyntheticSound.UI_CLOSE to createUiCloseSoundSamples(),
+                SyntheticSound.UI_PRESS to createUiPressSoundSamples(),
+            ),
+        )
+    }
+
+    private fun playSyntheticPageTurnSound(previous: Boolean) {
+        soundPlayer.play(if (previous) SyntheticSound.PAGE_PREVIOUS else SyntheticSound.PAGE_NEXT)
+    }
+
+    private fun playSyntheticUiSound(kind: UiFeedbackKind) {
+        val sound = when (kind) {
+            UiFeedbackKind.OPEN -> SyntheticSound.UI_OPEN
+            UiFeedbackKind.CLOSE -> SyntheticSound.UI_CLOSE
+            UiFeedbackKind.PRESS -> SyntheticSound.UI_PRESS
+        }
+        soundPlayer.play(sound)
+    }
+
+    private fun createUiOpenSoundSamples(): ShortArray {
+        return createCyberUiSoundSamples(
+            durationSeconds = UI_OPEN_SOUND_SECONDS,
+            startHz = UI_OPEN_START_HZ,
+            endHz = UI_OPEN_END_HZ,
+            outputGain = UI_OPEN_OUTPUT_GAIN,
+            shimmerGain = UI_OPEN_SHIMMER_GAIN,
+            growlGain = UI_OPEN_GROWL_GAIN,
+            noiseGain = UI_OPEN_NOISE_GAIN,
+            decay = UI_OPEN_DECAY,
+        )
+    }
+
+    private fun createUiCloseSoundSamples(): ShortArray {
+        return createCyberUiSoundSamples(
+            durationSeconds = UI_CLOSE_SOUND_SECONDS,
+            startHz = UI_CLOSE_START_HZ,
+            endHz = UI_CLOSE_END_HZ,
+            outputGain = UI_CLOSE_OUTPUT_GAIN,
+            shimmerGain = UI_CLOSE_SHIMMER_GAIN,
+            growlGain = UI_CLOSE_GROWL_GAIN,
+            noiseGain = UI_CLOSE_NOISE_GAIN,
+            decay = UI_CLOSE_DECAY,
+        )
+    }
+
+    private fun createUiPressSoundSamples(): ShortArray {
+        return createCyberUiSoundSamples(
+            durationSeconds = UI_PRESS_SOUND_SECONDS,
+            startHz = UI_PRESS_START_HZ,
+            endHz = UI_PRESS_END_HZ,
+            outputGain = UI_PRESS_OUTPUT_GAIN,
+            shimmerGain = UI_PRESS_SHIMMER_GAIN,
+            growlGain = UI_PRESS_GROWL_GAIN,
+            noiseGain = UI_PRESS_NOISE_GAIN,
+            decay = UI_PRESS_DECAY,
+        )
+    }
+
+    private fun createCyberUiSoundSamples(
+        durationSeconds: Double,
+        startHz: Double,
+        endHz: Double,
+        outputGain: Double,
+        shimmerGain: Double,
+        growlGain: Double,
+        noiseGain: Double,
+        decay: Double,
+    ): ShortArray {
+        val sampleCount = max(1, (SOUND_SAMPLE_RATE * durationSeconds).roundToInt())
+        val samples = ShortArray(sampleCount)
+        var energyPhase = 0.0
+        var modulationPhase = 0.0
+        var shimmerPhase = 0.0
+        val frequencyRatio = endHz / startHz
+        for (index in samples.indices) {
+            val t = index.toDouble() / sampleCount.toDouble()
+            val attack = (t / UI_SOUND_ATTACK_RATIO).coerceIn(0.0, 1.0)
+            val release = ((1.0 - t) / (1.0 - UI_SOUND_ATTACK_RATIO)).coerceIn(0.0, 1.0)
+            val envelope = attack * release.pow(decay)
+            val modulationFrequency = UI_SOUND_MOD_START_HZ + (UI_SOUND_MOD_END_HZ - UI_SOUND_MOD_START_HZ) * t
+            modulationPhase += (2.0 * PI * modulationFrequency) / SOUND_SAMPLE_RATE
+            val frequency = (startHz * frequencyRatio.pow(t)) +
+                sin(modulationPhase) * UI_SOUND_MOD_DEPTH_HZ * (1.0 - t)
+            val shimmerFrequency = UI_SOUND_SHIMMER_START_HZ +
+                (UI_SOUND_SHIMMER_END_HZ - UI_SOUND_SHIMMER_START_HZ) * t
+            energyPhase += (2.0 * PI * frequency) / SOUND_SAMPLE_RATE
+            shimmerPhase += (2.0 * PI * shimmerFrequency) / SOUND_SAMPLE_RATE
+
+            val tremolo = UI_SOUND_TREMOLO_BASE + sin(modulationPhase) * UI_SOUND_TREMOLO_DEPTH
+            val core = sin(energyPhase) * UI_SOUND_CORE_GAIN
+            val growl = sin(energyPhase * UI_SOUND_GROWL_MULTIPLIER) * growlGain
+            val shimmer = sin(shimmerPhase) * shimmerGain
+            val air = ((Random.nextDouble() * 2.0) - 1.0) * noiseGain * (1.0 - t).pow(0.45)
+            val output = bitCrush((core + growl + shimmer + air) * envelope * tremolo * outputGain, UI_SOUND_CRUSH_LEVELS)
+            samples[index] = toPcm16(output)
+        }
+        return samples
+    }
+
+    private fun createPageTurnSoundSamples(previous: Boolean, durationSeconds: Double): ShortArray {
+        val sampleCount = max(1, (SOUND_SAMPLE_RATE * durationSeconds).roundToInt())
+        val samples = ShortArray(sampleCount)
+        var low = 0.0
+        var band = 0.0
+        val startFrequency = if (previous) PAGE_TURN_PREVIOUS_START_HZ else PAGE_TURN_NEXT_START_HZ
+        val endFrequency = if (previous) PAGE_TURN_PREVIOUS_END_HZ else PAGE_TURN_NEXT_END_HZ
+        val frequencyRatio = endFrequency / startFrequency
+
+        for (index in samples.indices) {
+            val t = index.toDouble() / sampleCount.toDouble()
+            val envelope = sin(PI * t) * (1.0 - t).pow(PAGE_TURN_SOUND_DECAY)
+            val noise = (Random.nextDouble() * 2.0) - 1.0
+            val frequency = startFrequency * frequencyRatio.pow(t)
+            val filterAmount = 2.0 * sin(PI * frequency / SOUND_SAMPLE_RATE)
+            val high = noise - low - (PAGE_TURN_SOUND_FILTER_DAMPING * band)
+            band += filterAmount * high
+            low += filterAmount * band
+            val output = band * envelope * PAGE_TURN_SOUND_NOISE_GAIN * PAGE_TURN_SOUND_OUTPUT_GAIN
+            samples[index] = toPcm16(output)
+        }
+        return samples
+    }
+
+    private fun bitCrush(value: Double, levels: Double): Double {
+        return (value * levels).roundToInt() / levels
+    }
+
+    private fun toPcm16(value: Double): Short {
+        return (value * Short.MAX_VALUE).roundToInt()
+            .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+            .toShort()
+    }
+
+    private inner class SyntheticSoundPlayer {
+        private var soundPool: SoundPool? = null
+        private val soundIds = mutableMapOf<SyntheticSound, Int>()
+        private val loadedSoundIds = mutableSetOf<Int>()
+        private val pendingSoundIds = mutableSetOf<Int>()
+
+        @Synchronized
+        fun prepare(samplesBySound: Map<SyntheticSound, ShortArray>) {
+            release()
+            val attributes = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .build()
+            val pool = SoundPool.Builder()
+                .setMaxStreams(SOUND_POOL_MAX_STREAMS)
+                .setAudioAttributes(attributes)
+                .build()
+            pool.setOnLoadCompleteListener { _, sampleId, status ->
+                if (status == 0) {
+                    var shouldPlay = false
+                    synchronized(this) {
+                        loadedSoundIds.add(sampleId)
+                        shouldPlay = pendingSoundIds.remove(sampleId)
+                    }
+                    if (shouldPlay) {
+                        pool.play(sampleId, 1f, 1f, 1, 0, 1f)
+                    }
+                }
+            }
+            soundPool = pool
+            samplesBySound.forEach { (sound, samples) ->
+                createRuntimeWavFile(sound, samples)?.let { file ->
+                    val soundId = pool.load(file.absolutePath, 1)
+                    if (soundId != 0) {
+                        soundIds[sound] = soundId
+                    }
+                }
+            }
+        }
+
+        @Synchronized
+        fun play(sound: SyntheticSound) {
+            val pool = soundPool ?: return
+            val soundId = soundIds[sound] ?: return
+            if (!loadedSoundIds.contains(soundId)) {
+                pendingSoundIds.add(soundId)
+                return
+            }
+            pool.play(soundId, 1f, 1f, 1, 0, 1f)
+        }
+
+        @Synchronized
+        fun release() {
+            soundPool?.release()
+            soundPool = null
+            soundIds.clear()
+            loadedSoundIds.clear()
+            pendingSoundIds.clear()
+        }
+
+        private fun createRuntimeWavFile(sound: SyntheticSound, samples: ShortArray): File? {
+            if (samples.isEmpty()) return null
+            return runCatching {
+                val file = File(cacheDir, "durumari-${sound.name.lowercase(Locale.ROOT)}.wav")
+                file.outputStream().use { output ->
+                    writeWav(output, samples)
+                }
+                file
+            }.getOrNull()
+        }
+
+        private fun writeWav(output: java.io.OutputStream, samples: ShortArray) {
+            val dataSize = samples.size * Short.SIZE_BYTES
+            output.writeAscii("RIFF")
+            output.writeIntLe(WAV_RIFF_CHUNK_OVERHEAD_BYTES + dataSize)
+            output.writeAscii("WAVE")
+            output.writeAscii("fmt ")
+            output.writeIntLe(16)
+            output.writeShortLe(1)
+            output.writeShortLe(1)
+            output.writeIntLe(SOUND_SAMPLE_RATE)
+            output.writeIntLe(SOUND_SAMPLE_RATE * Short.SIZE_BYTES)
+            output.writeShortLe(Short.SIZE_BYTES)
+            output.writeShortLe(16)
+            output.writeAscii("data")
+            output.writeIntLe(dataSize)
+            samples.forEach { sample ->
+                output.writeShortLe(sample.toInt())
+            }
+        }
+
+        private fun java.io.OutputStream.writeAscii(value: String) {
+            write(value.toByteArray(Charsets.US_ASCII))
+        }
+
+        private fun java.io.OutputStream.writeIntLe(value: Int) {
+            write(value and 0xff)
+            write((value ushr 8) and 0xff)
+            write((value ushr 16) and 0xff)
+            write((value ushr 24) and 0xff)
+        }
+
+        private fun java.io.OutputStream.writeShortLe(value: Int) {
+            write(value and 0xff)
+            write((value ushr 8) and 0xff)
         }
     }
 
     private fun showViewerMenuSheet(theme: ThemeTokens) {
+        playUiFeedback(UiFeedbackKind.OPEN)
         val sheet = createSheetSurface(theme)
         sheet.addView(createSheetHandle(theme), linear(dp(42), dp(5), top = 17, bottom = 18).apply { gravity = Gravity.CENTER_HORIZONTAL })
         val currentPage = activePageIndex + 1
@@ -1771,8 +2068,7 @@ class MainActivity : Activity() {
         header.addView(text("×", theme.secondary, 28f, bold = true, gravity = Gravity.CENTER).apply {
             minWidth = dp(48)
             minHeight = dp(48)
-            isClickable = true
-            setOnClickListener { rootLayer?.dismissOverlay() }
+            setUiClickListener(UiFeedbackKind.CLOSE) { rootLayer?.dismissOverlay() }
         }, linear(dp(48), dp(48)))
         sheet.addView(header, linear(match, wrap, bottom = 16))
 
@@ -1787,21 +2083,21 @@ class MainActivity : Activity() {
         val grid = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val firstRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         firstRow.addView(createViewerAction(theme, "🔖", "책갈피").apply {
-            setOnClickListener { toggleActiveBookmark(theme) }
+            setUiClickListener { toggleActiveBookmark(theme) }
         }, LinearLayout.LayoutParams(0, dp(78), 1f))
         firstRow.addView(createViewerAction(theme, "📑", "목차", enabled = false), LinearLayout.LayoutParams(0, dp(78), 1f).apply { leftMargin = dp(10) })
         firstRow.addView(createViewerAction(theme, "🧭", "이동").apply {
-            setOnClickListener { showPageMoveSheet(theme) }
+            setUiClickListener(UiFeedbackKind.OPEN) { showPageMoveSheet(theme) }
         }, LinearLayout.LayoutParams(0, dp(78), 1f).apply { leftMargin = dp(10) })
         val secondRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         secondRow.addView(createViewerAction(theme, "🔤", "인코딩").apply {
-            setOnClickListener { showEncodingSheet(theme) }
+            setUiClickListener(UiFeedbackKind.OPEN) { showEncodingSheet(theme) }
         }, LinearLayout.LayoutParams(0, dp(78), 1f))
         secondRow.addView(createViewerAction(theme, "⚙️", "설정").apply {
-            setOnClickListener { showSettingsOverlay() }
+            setUiClickListener(UiFeedbackKind.OPEN) { showSettingsOverlay() }
         }, LinearLayout.LayoutParams(0, dp(78), 1f).apply { leftMargin = dp(10) })
         secondRow.addView(createViewerAction(theme, "📚", "목록").apply {
-            setOnClickListener {
+            setUiClickListener(UiFeedbackKind.CLOSE) {
                 saveActiveReading()
                 clearViewerResume()
                 rootLayer?.dismissOverlay()
@@ -1903,8 +2199,7 @@ class MainActivity : Activity() {
         listOf("첫페이지", "이전 책갈피", "다음 책갈피").forEachIndexed { index, label ->
             val button = text(label, theme.text, 14f, bold = false, gravity = Gravity.CENTER).apply {
                 background = roundedRect(theme.card, 12, strokeColor = theme.border)
-                isClickable = true
-                setOnClickListener {
+                setUiClickListener {
                     val targetBookmarkPage = when (index) {
                         1 -> bookmarkPages.lastOrNull { it < draftPage() }
                         2 -> bookmarkPages.firstOrNull { it > draftPage() }
@@ -1935,8 +2230,7 @@ class MainActivity : Activity() {
         refreshPageMoveActions()
         sheet.addView(text("확인", theme.accentForeground, 16f, bold = true, gravity = Gravity.CENTER).apply {
             background = roundedRect(theme.accent, 12)
-            isClickable = true
-            setOnClickListener {
+            setUiClickListener {
                 val target = pageInput.text.toString().toIntOrNull()?.coerceIn(1, totalPages) ?: currentPage
                 rootLayer?.dismissOverlay()
                 if (target != currentPage) {
@@ -1964,7 +2258,7 @@ class MainActivity : Activity() {
                 background = roundedRect(if (active) theme.card else theme.bg, 12, strokeColor = if (active) theme.accent else theme.border)
                 isEnabled = !active && document != null && document.kind != BookKind.EPUB
                 isClickable = isEnabled
-                setOnClickListener {
+                setUiClickListener {
                     if (document != null) {
                         rootLayer?.dismissOverlay()
                         showViewerLoadingThenPage(
@@ -2196,8 +2490,7 @@ class MainActivity : Activity() {
         header.addView(text("×", theme.secondary, 28f, bold = true, gravity = Gravity.CENTER).apply {
             minWidth = dp(48)
             minHeight = dp(48)
-            isClickable = true
-            setOnClickListener { rootLayer?.dismissOverlay() }
+            setUiClickListener(UiFeedbackKind.CLOSE) { rootLayer?.dismissOverlay() }
         }, linear(dp(48), dp(48)))
         return header
     }
@@ -2279,8 +2572,7 @@ class MainActivity : Activity() {
         val closeView = text("×", appliedTheme.secondary, 28f, bold = true, gravity = Gravity.CENTER).apply {
             minWidth = dp(44)
             minHeight = dp(44)
-            isClickable = true
-            setOnClickListener {
+            setUiClickListener(UiFeedbackKind.CLOSE) {
                 dropdownLayer.removeAllViews()
                 pruneReaderTypefaceCache(draftSettings)
                 rootLayer?.dismissOverlay()
@@ -2318,8 +2610,7 @@ class MainActivity : Activity() {
         val confirmButton = text("확인", appliedTheme.accentForeground, 16f, bold = true, gravity = Gravity.CENTER).apply {
             minHeight = dp(48)
             background = roundedRect(appliedTheme.accent, 12)
-            isClickable = true
-            setOnClickListener {
+            setUiClickListener {
                 val previous = settings
                 val targetOffset = if (viewerWasOpen && activeDocumentText != null && paginationSettingsChanged(previous, draftSettings)) {
                     anchorOffsetForPage(activePageIndex)
@@ -2385,8 +2676,8 @@ class MainActivity : Activity() {
             dropdownLayer.addView(
                 View(this).apply {
                     setBackgroundColor(Color.TRANSPARENT)
-                    isClickable = true
-                    setOnClickListener { hideFontDropdown() }
+                    setSoundEffectsEnabled(false)
+                    setUiClickListener(UiFeedbackKind.CLOSE) { hideFontDropdown() }
                 },
                 FrameLayout.LayoutParams(match, match),
             )
@@ -2511,6 +2802,7 @@ class MainActivity : Activity() {
         defaultName: String = "소설",
         onRegister: ((String) -> Unit)? = null,
     ) {
+        playUiFeedback(UiFeedbackKind.OPEN)
         val sheet = createSheetSurface(theme)
         sheet.addView(createSheetHandle(theme), linear(dp(42), dp(5), top = 17, bottom = 18).apply { gravity = Gravity.CENTER_HORIZONTAL })
         sheet.addView(createSheetHeader(theme, "폴더 이름 지정", "탭에 표시될 이름을 입력하세요"), linear(match, wrap, bottom = 20))
@@ -2532,8 +2824,7 @@ class MainActivity : Activity() {
         sheet.addView(text("등록하기", theme.accentForeground, 16f, bold = true, gravity = Gravity.CENTER).apply {
             minHeight = dp(48)
             background = roundedRect(theme.accent, 12)
-            isClickable = true
-            setOnClickListener {
+            setUiClickListener {
                 val name = input.text.toString().trim().ifBlank { defaultName }
                 rootLayer?.dismissOverlay()
                 onRegister?.invoke(name)
@@ -2587,8 +2878,7 @@ class MainActivity : Activity() {
         val fontIndex = currentReaderFontIndex(draftSettings)
         val currentFont = readerFontOptions[fontIndex]
         section.addView(createComboRow(theme, "🖋️ 서체", currentFont.label).apply {
-            isClickable = true
-            setOnClickListener { onFontPickerOpen(this) }
+            setUiClickListener(UiFeedbackKind.OPEN) { onFontPickerOpen(this) }
         }, linear(match, wrap))
         section.addView(createStepperRow(
             theme,
@@ -2756,7 +3046,7 @@ class MainActivity : Activity() {
         listOf(DurumariThemes.light, DurumariThemes.dark, DurumariThemes.paper, DurumariThemes.chalk).forEachIndexed { index, option ->
             themeGrid.addView(
                 createThemeOption(theme, option, draftSettings.theme == option.name).apply {
-                    setOnClickListener {
+                    setUiClickListener {
                         onSettingsChanged(draftSettings.copy(theme = option.name))
                     }
                 },
@@ -2777,13 +3067,11 @@ class MainActivity : Activity() {
         }
         actions.addView(text("♻️ 설정 초기화", theme.text, 14f, bold = true, gravity = Gravity.CENTER).apply {
             background = roundedRect(theme.card, 12, strokeColor = theme.border)
-            isClickable = true
-            setOnClickListener { onReset() }
+            setUiClickListener { onReset() }
         }, LinearLayout.LayoutParams(0, dp(44), 1f))
         actions.addView(text("🗑️ 폴더 전체 해제", theme.danger, 14f, bold = true, gravity = Gravity.CENTER).apply {
             background = roundedRect(theme.card, 12, strokeColor = theme.danger)
-            isClickable = true
-            setOnClickListener { onClearFolders() }
+            setUiClickListener { onClearFolders() }
         }, LinearLayout.LayoutParams(0, dp(44), 1f).apply { leftMargin = dp(SETTINGS_CONTROL_GAP_DP) })
         section.addView(actions, linear(match, wrap))
         return section
@@ -2836,7 +3124,7 @@ class MainActivity : Activity() {
                 }
                 isClickable = true
                 isFocusable = true
-                setOnClickListener { onSelected(option) }
+                setUiClickListener { onSelected(option) }
             }
             if (selected) selectedRow = row
             content.addView(row, linear(match, dp(SETTINGS_COMBO_ROW_HEIGHT_DP)))
@@ -2874,14 +3162,14 @@ class MainActivity : Activity() {
             isEnabled = onMinus != null
             isClickable = onMinus != null
             alpha = if (onMinus != null) 1f else 0.45f
-            setOnClickListener { onMinus?.invoke() }
+            if (onMinus != null) setUiClickListener { onMinus.invoke() }
         }, linear(dp(38), dp(38)))
         row.addView(text(value, theme.text, 15f, bold = true, gravity = Gravity.CENTER), LinearLayout.LayoutParams(0, wrap, 1f))
         row.addView(createMiniButton(theme, "+").apply {
             isEnabled = onPlus != null
             isClickable = onPlus != null
             alpha = if (onPlus != null) 1f else 0.45f
-            setOnClickListener { onPlus?.invoke() }
+            if (onPlus != null) setUiClickListener { onPlus.invoke() }
         }, linear(dp(38), dp(38)))
         return row
     }
@@ -2894,7 +3182,9 @@ class MainActivity : Activity() {
     ): View {
         val row = createSettingBaseRow(theme)
         row.isClickable = onToggle != null
-        row.setOnClickListener { onToggle?.invoke() }
+        if (onToggle != null) {
+            row.setUiClickListener { onToggle.invoke() }
+        }
         row.addView(text(label, theme.text, 15f, bold = true, gravity = Gravity.CENTER_VERTICAL), LinearLayout.LayoutParams(0, wrap, 1f))
         row.addView(text(if (checked) "✓" else "", if (checked) theme.accentForeground else theme.accent, 18f, bold = true, gravity = Gravity.CENTER).apply {
             background = roundedRect(if (checked) theme.accent else Color.TRANSPARENT, 8, strokeColor = theme.accent, strokeWidthDp = 2)
@@ -2932,7 +3222,7 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
             setPadding(dp(SETTINGS_CONTROL_GAP_DP), 0, dp(SETTINGS_CONTROL_GAP_DP), 0)
             isClickable = onToggle != null
-            setOnClickListener { onToggle?.invoke() }
+            if (onToggle != null) setUiClickListener { onToggle.invoke() }
             background = roundedRect(
                 color = if (selected) theme.bg else Color.TRANSPARENT,
                 radiusDp = 14,
@@ -2963,7 +3253,7 @@ class MainActivity : Activity() {
                 text(value, if (index == activeIndex) theme.accentText else theme.text, 13f, bold = true, gravity = Gravity.CENTER).apply {
                     setPadding(dp(SETTINGS_CONTROL_GAP_DP), 0, dp(SETTINGS_CONTROL_GAP_DP), 0)
                     isClickable = onSelect != null
-                    setOnClickListener { onSelect?.invoke(index) }
+                    if (onSelect != null) setUiClickListener { onSelect.invoke(index) }
                     background = roundedRect(
                         color = if (index == activeIndex) theme.bg else Color.TRANSPARENT,
                         radiusDp = 14,
@@ -3087,8 +3377,7 @@ class MainActivity : Activity() {
                 minHeight = dp(44)
                 setPadding(dp(18), 0, dp(18), 0)
                 background = roundedRect(theme.accent, 12)
-                isClickable = true
-                setOnClickListener { onAction() }
+                setUiClickListener(UiFeedbackKind.OPEN) { onAction() }
             }, linear(wrap, dp(44), top = 22))
         }
         return panel
@@ -3263,6 +3552,7 @@ class MainActivity : Activity() {
         gravity: Int = Gravity.START,
     ): TextView {
         return TextView(this).apply {
+            setSoundEffectsEnabled(false)
             text = value
             setTextColor(color)
             setTextSize(TypedValue.COMPLEX_UNIT_DIP, size)
@@ -3557,6 +3847,54 @@ class MainActivity : Activity() {
         private const val SWIPE_CONFIRM_RATIO = 0.20f
         private const val WHEEL_TURN_THROTTLE_MS = 300L
         private const val PREVIEW_PAGE_NUMBER_RESERVED_DP = 34
+        private const val SOUND_SAMPLE_RATE = 44100
+        private const val SOUND_POOL_MAX_STREAMS = 4
+        private const val WAV_RIFF_CHUNK_OVERHEAD_BYTES = 36
+        private const val PAGE_TURN_PREVIOUS_SOUND_SECONDS = 0.14
+        private const val PAGE_TURN_NEXT_SOUND_SECONDS = 0.19
+        private const val PAGE_TURN_PREVIOUS_START_HZ = 900.0
+        private const val PAGE_TURN_PREVIOUS_END_HZ = 1800.0
+        private const val PAGE_TURN_NEXT_START_HZ = 1600.0
+        private const val PAGE_TURN_NEXT_END_HZ = 3100.0
+        private const val PAGE_TURN_SOUND_NOISE_GAIN = 0.12
+        private const val PAGE_TURN_SOUND_OUTPUT_GAIN = 0.72
+        private const val PAGE_TURN_SOUND_DECAY = 0.8
+        private const val PAGE_TURN_SOUND_FILTER_DAMPING = 0.45
+        private const val UI_OPEN_SOUND_SECONDS = 0.18
+        private const val UI_OPEN_START_HZ = 220.0
+        private const val UI_OPEN_END_HZ = 980.0
+        private const val UI_OPEN_OUTPUT_GAIN = 0.46
+        private const val UI_OPEN_SHIMMER_GAIN = 0.22
+        private const val UI_OPEN_GROWL_GAIN = 0.24
+        private const val UI_OPEN_NOISE_GAIN = 0.052
+        private const val UI_OPEN_DECAY = 0.64
+        private const val UI_CLOSE_SOUND_SECONDS = 0.15
+        private const val UI_CLOSE_START_HZ = 880.0
+        private const val UI_CLOSE_END_HZ = 240.0
+        private const val UI_CLOSE_OUTPUT_GAIN = 0.40
+        private const val UI_CLOSE_SHIMMER_GAIN = 0.14
+        private const val UI_CLOSE_GROWL_GAIN = 0.30
+        private const val UI_CLOSE_NOISE_GAIN = 0.042
+        private const val UI_CLOSE_DECAY = 1.05
+        private const val UI_PRESS_SOUND_SECONDS = 0.075
+        private const val UI_PRESS_START_HZ = 520.0
+        private const val UI_PRESS_END_HZ = 720.0
+        private const val UI_PRESS_OUTPUT_GAIN = 0.34
+        private const val UI_PRESS_SHIMMER_GAIN = 0.16
+        private const val UI_PRESS_GROWL_GAIN = 0.18
+        private const val UI_PRESS_NOISE_GAIN = 0.035
+        private const val UI_PRESS_DECAY = 1.6
+        private const val UI_SOUND_ATTACK_RATIO = 0.08
+        private const val UI_SOUND_MOD_START_HZ = 34.0
+        private const val UI_SOUND_MOD_END_HZ = 170.0
+        private const val UI_SOUND_MOD_DEPTH_HZ = 92.0
+        private const val UI_SOUND_SHIMMER_START_HZ = 1800.0
+        private const val UI_SOUND_SHIMMER_END_HZ = 5200.0
+        private const val UI_SOUND_CORE_GAIN = 0.72
+        private const val UI_SOUND_GROWL_MULTIPLIER = 2.03
+        private const val UI_SOUND_TREMOLO_BASE = 0.84
+        private const val UI_SOUND_TREMOLO_DEPTH = 0.16
+        private const val UI_SOUND_CRUSH_LEVELS = 44.0
         private const val INTRO_STATUS_INIT = "앱 초기화 중..."
         private const val INTRO_STATUS_LOCAL_FOLDERS = "로컬 폴더를 확인하는 중..."
         private const val INTRO_STATUS_LAST_VIEWER = "마지막으로 읽던 문서를 확인하는 중..."

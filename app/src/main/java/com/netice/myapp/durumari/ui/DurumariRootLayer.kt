@@ -40,6 +40,7 @@ class DurumariRootLayer @JvmOverloads constructor(
     private var themedNavigationBarColor: Int = Color.TRANSPARENT
 
     var onInsetsChanged: ((top: Int, bottom: Int) -> Unit)? = null
+    var onUserDismissOverlay: (() -> Unit)? = null
 
     val contentFrameWidthPx: Int
         get() = contentFrameWidth
@@ -51,6 +52,10 @@ class DurumariRootLayer @JvmOverloads constructor(
         get() = overlayLayer.visibility == VISIBLE
 
     init {
+        setSoundEffectsEnabled(false)
+        contentFrame.setSoundEffectsEnabled(false)
+        overlayLayer.setSoundEffectsEnabled(false)
+        statusBarArea.setSoundEffectsEnabled(false)
         clipToPadding = false
         clipChildren = false
         addView(contentFrame)
@@ -74,6 +79,7 @@ class DurumariRootLayer @JvmOverloads constructor(
     }
 
     fun setScreenContent(content: View) {
+        disableDefaultSoundEffects(content)
         contentFrame.removeAllViews()
         contentFrame.addView(content, LayoutParams(match, match))
     }
@@ -108,6 +114,7 @@ class DurumariRootLayer @JvmOverloads constructor(
             orientation = LinearLayout.VERTICAL
             clipToPadding = false
             clipChildren = false
+            setSoundEffectsEnabled(false)
         }
         bottomSheetFrame.addView(sheetContent, LinearLayout.LayoutParams(match, wrap))
         bottomSheetFrame.addView(
@@ -115,6 +122,7 @@ class DurumariRootLayer @JvmOverloads constructor(
             LinearLayout.LayoutParams(match, safeBottomInset),
         )
         attachBottomSheetDrag(bottomSheetFrame)
+        disableDefaultSoundEffects(bottomSheetFrame)
         showOverlay(OverlayMode.BOTTOM_SHEET, bottomSheetFrame, dimColor, dismissOnDim)
     }
 
@@ -143,7 +151,7 @@ class DurumariRootLayer @JvmOverloads constructor(
                         view.animate()
                             .translationY(view.height.toFloat())
                             .setDuration(140)
-                            .withEndAction { dismissOverlay() }
+                            .withEndAction { dismissOverlayFromUser() }
                             .start()
                     } else {
                         view.animate()
@@ -170,8 +178,9 @@ class DurumariRootLayer @JvmOverloads constructor(
             overlayLayer.addView(
                 View(context).apply {
                     setBackgroundColor(dimColor)
+                    setSoundEffectsEnabled(false)
                     isClickable = dismissOnDim
-                    if (dismissOnDim) setOnClickListener { dismissOverlay() }
+                    if (dismissOnDim) setOnClickListener { dismissOverlayFromUser() }
                 },
                 LayoutParams(match, match),
             )
@@ -180,8 +189,24 @@ class DurumariRootLayer @JvmOverloads constructor(
         overlayPanel = content
         overlayLayer.visibility = VISIBLE
         overlayLayer.isClickable = true
+        overlayLayer.setSoundEffectsEnabled(false)
+        disableDefaultSoundEffects(content)
         overlayLayer.addView(content)
         positionOverlayPanel()
+    }
+
+    private fun dismissOverlayFromUser() {
+        onUserDismissOverlay?.invoke()
+        dismissOverlay()
+    }
+
+    private fun disableDefaultSoundEffects(view: View) {
+        view.setSoundEffectsEnabled(false)
+        if (view is ViewGroup) {
+            for (index in 0 until view.childCount) {
+                disableDefaultSoundEffects(view.getChildAt(index))
+            }
+        }
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
