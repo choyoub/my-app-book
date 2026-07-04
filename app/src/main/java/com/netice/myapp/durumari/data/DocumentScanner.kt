@@ -70,10 +70,11 @@ class DocumentScanner(private val contentResolver: ContentResolver) {
     }
 
     private fun String.removeKnownExtension(): String {
-        return replace(Regex("(?i)\\.(txt|epub|zip|gz)$"), "")
+        return replace(KNOWN_EXTENSION_REGEX, "")
     }
 
     private companion object {
+        private val KNOWN_EXTENSION_REGEX = Regex("(?i)\\.(txt|epub|zip|gz)$")
         private val DOCUMENT_COLUMNS = arrayOf(
             DocumentsContract.Document.COLUMN_DOCUMENT_ID,
             DocumentsContract.Document.COLUMN_DISPLAY_NAME,

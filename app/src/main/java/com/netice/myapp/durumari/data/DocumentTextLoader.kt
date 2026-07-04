@@ -210,17 +210,17 @@ class DocumentTextLoader(private val contentResolver: ContentResolver) {
 
     private fun htmlToText(html: String): String {
         return html
-            .replace(Regex("(?is)<script.*?</script>"), " ")
-            .replace(Regex("(?is)<style.*?</style>"), " ")
-            .replace(Regex("(?i)<br\\s*/?>"), "\n")
-            .replace(Regex("(?i)</p>"), "\n\n")
-            .replace(Regex("<[^>]+>"), " ")
+            .replace(SCRIPT_TAG_REGEX, " ")
+            .replace(STYLE_TAG_REGEX, " ")
+            .replace(BR_TAG_REGEX, "\n")
+            .replace(P_END_TAG_REGEX, "\n\n")
+            .replace(HTML_TAG_REGEX, " ")
             .replace("&nbsp;", " ")
             .replace("&lt;", "<")
             .replace("&gt;", ">")
             .replace("&amp;", "&")
-            .replace(Regex("[ \\t\\x0B\\f\\r]+"), " ")
-            .replace(Regex("\\n{3,}"), "\n\n")
+            .replace(HORIZONTAL_SPACE_REGEX, " ")
+            .replace(EXTRA_NEWLINES_REGEX, "\n\n")
             .trim()
     }
 
@@ -239,5 +239,12 @@ class DocumentTextLoader(private val contentResolver: ContentResolver) {
         private const val RAW_LIMIT_BYTES = 100 * 1024 * 1024
         private const val INFLATED_LIMIT_BYTES = 500 * 1024 * 1024
         private const val ZIP_ENTRY_LIMIT = 2_000
+        private val SCRIPT_TAG_REGEX = Regex("(?is)<script.*?</script>")
+        private val STYLE_TAG_REGEX = Regex("(?is)<style.*?</style>")
+        private val BR_TAG_REGEX = Regex("(?i)<br\\s*/?>")
+        private val P_END_TAG_REGEX = Regex("(?i)</p>")
+        private val HTML_TAG_REGEX = Regex("<[^>]+>")
+        private val HORIZONTAL_SPACE_REGEX = Regex("[ \\t\\x0B\\f\\r]+")
+        private val EXTRA_NEWLINES_REGEX = Regex("\\n{3,}")
     }
 }

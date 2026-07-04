@@ -14,8 +14,6 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
-import android.media.AudioAttributes
-import android.media.SoundPool
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -43,6 +41,8 @@ import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import com.netice.myapp.durumari.audio.SyntheticSoundPlayer
+import com.netice.myapp.durumari.audio.UiSoundKind
 import com.netice.myapp.durumari.data.DecodedDocument
 import com.netice.myapp.durumari.data.DocumentScanner
 import com.netice.myapp.durumari.data.DocumentTextLoader
@@ -69,17 +69,11 @@ import com.netice.myapp.durumari.ui.DurumariRootLayer
 import com.netice.myapp.durumari.ui.ReaderCanvasView
 import com.netice.myapp.durumari.ui.ScrollArtworkView
 import com.netice.myapp.durumari.ui.ThemeTokens
-import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import kotlin.math.PI
 import kotlin.math.abs
-import kotlin.math.max
-import kotlin.math.pow
 import kotlin.math.roundToInt
-import kotlin.math.sin
-import kotlin.random.Random
 
 class MainActivity : Activity() {
     private enum class MainTab(val label: String, val searchHint: String) {
@@ -92,14 +86,6 @@ class MainActivity : Activity() {
         NONE,
         TRACK,
         MARKER,
-    }
-
-    private enum class SyntheticSound {
-        PAGE_PREVIOUS,
-        PAGE_NEXT,
-        UI_OPEN,
-        UI_CLOSE,
-        UI_PRESS,
     }
 
     private enum class UiFeedbackKind {
@@ -138,21 +124,30 @@ class MainActivity : Activity() {
     private var safeTopInset: Int = 0
     private var safeBottomInset: Int = 0
     private lateinit var appTypeface: Typeface
+    @Volatile
+    private var activityDestroyed: Boolean = false
     private val readerTypefaceCache = object : LinkedHashMap<String, Typeface>(MAX_READER_TYPEFACE_CACHE, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Typeface>?): Boolean {
             return size > MAX_READER_TYPEFACE_CACHE
         }
     }
     private var folders: List<FolderRecord> = emptyList()
+    private var foldersById: Map<String, FolderRecord> = emptyMap()
     private var documents: List<DocumentRecord> = emptyList()
+    private var documentsById: Map<String, DocumentRecord> = emptyMap()
     private var readingsById: Map<String, ReadingRecord> = emptyMap()
     private var bookmarks: List<BookmarkRecord> = emptyList()
+    private var bookmarkDocumentIds: Set<String> = emptySet()
     private var activeDocument: DocumentRecord? = null
     private var activePages: List<ReaderCanvasView.PageSlice> = emptyList()
+    private var activePaginationWidthPx: Int = 0
+    private var activePaginationHeightPx: Int = 0
+    private var paginationRequestId: Long = 0L
     private var activePageIndex: Int = 0
     private var activeEncoding: String? = null
     private var activeDocumentText: String? = null
     private var activeReaderCanvas: ReaderCanvasView? = null
+    private var pendingViewerAnchorOffset: Int? = null
     private var lastMainSwipeAt: Long = 0L
     private var mainTabAnimating: Boolean = false
     private var mainSwipeHost: FrameLayout? = null
@@ -162,12 +157,18 @@ class MainActivity : Activity() {
     private var backInvokedCallback: OnBackInvokedCallback? = null
     private val dateFormat = SimpleDateFormat("yyyy.MM.dd", Locale.KOREA)
     private data class ReaderFontOption(val family: String, val label: String, val assetPath: String)
+    private data class PaginationResult(
+        val pages: List<ReaderCanvasView.PageSlice>,
+        val widthPx: Int,
+        val heightPx: Int,
+    )
     private data class ViewerLoadResult(
         val document: DocumentRecord,
         val text: String,
-        val pages: List<ReaderCanvasView.PageSlice>,
+        val pagination: PaginationResult,
         val pageIndex: Int,
         val encoding: String?,
+        val anchorOffset: Int?,
     )
 
     private val readerFontOptions = listOf(
@@ -229,6 +230,7 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        activityDestroyed = true
         handler.removeCallbacksAndMessages(null)
         stopScrollAnimation()
         unregisterBackInvokedCallback()
@@ -346,7 +348,7 @@ class MainActivity : Activity() {
     }
 
     private fun closeViewerToMain() {
-        saveActiveReading()
+        saveActiveReading(pendingViewerAnchorOffset)
         clearViewerResume()
         rootLayer?.dismissOverlay()
         activeDocument = null
@@ -487,6 +489,7 @@ class MainActivity : Activity() {
         handler.removeCallbacksAndMessages(null)
         stopScrollAnimation()
         activeReaderCanvas = null
+        pendingViewerAnchorOffset = null
         val theme = DurumariThemes.tokens(settings.theme)
         configureSystemBars(theme)
 
@@ -900,16 +903,19 @@ class MainActivity : Activity() {
         settingsStore.save(settings)
     }
 
-    private fun matchesSearch(vararg values: String?): Boolean {
-        val query = searchQuery.trim()
-        if (query.isEmpty()) return true
-        val normalizedQuery = query.lowercase(Locale.KOREA)
+    private fun normalizedSearchQuery(): String {
+        return searchQuery.trim().lowercase(Locale.KOREA)
+    }
+
+    private fun matchesSearch(normalizedQuery: String, vararg values: String?): Boolean {
+        if (normalizedQuery.isEmpty()) return true
         return values.any { value ->
             value?.lowercase(Locale.KOREA)?.contains(normalizedQuery) == true
         }
     }
 
     private fun createTabContent(theme: ThemeTokens): View {
+        val normalizedQuery = normalizedSearchQuery()
         val list = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
         }
@@ -919,7 +925,7 @@ class MainActivity : Activity() {
                     documents.filter { document ->
                         val reading = readingsById[document.documentId]
                         (!settings.hideCompleted || reading?.completed != true) &&
-                            matchesSearch(document.title, folderName(document.folderId))
+                            matchesSearch(normalizedQuery, document.title, folderName(document.folderId))
                     },
                 )
                 if (visibleDocuments.isEmpty()) {
@@ -956,8 +962,8 @@ class MainActivity : Activity() {
             MainTab.HISTORY -> {
                 val historyRows = sortHistoryRows(
                     readingsById.values
-                    .mapNotNull { reading -> documents.firstOrNull { it.documentId == reading.documentId }?.let { it to reading } }
-                    .filter { (document, _) -> matchesSearch(document.title, folderName(document.folderId)) },
+                    .mapNotNull { reading -> documentsById[reading.documentId]?.let { it to reading } }
+                    .filter { (document, _) -> matchesSearch(normalizedQuery, document.title, folderName(document.folderId)) },
                 )
                 if (historyRows.isEmpty()) {
                     list.addView(
@@ -991,9 +997,9 @@ class MainActivity : Activity() {
             MainTab.BOOKMARKS -> {
                 val bookmarkRows = sortBookmarkRows(
                     bookmarks.map { bookmark ->
-                        bookmark to documents.firstOrNull { it.documentId == bookmark.documentId }
+                        bookmark to documentsById[bookmark.documentId]
                     }.filter { (bookmark, document) ->
-                        matchesSearch(document?.title, bookmark.preview, document?.folderId?.let { folderName(it) })
+                        matchesSearch(normalizedQuery, document?.title, bookmark.preview, document?.folderId?.let { folderName(it) })
                     },
                 )
                 if (bookmarkRows.isEmpty()) {
@@ -1299,7 +1305,7 @@ class MainActivity : Activity() {
             setUiClickListener {
                 appStore.removeReading(reading.documentId)
                 readingsById = readingsById - reading.documentId
-                bookmarks = bookmarks.filterNot { it.documentId == reading.documentId }
+                replaceBookmarks(bookmarks.filterNot { it.documentId == reading.documentId })
                 rootLayer?.dismissOverlay()
                 showMainScreen()
                 Toast.makeText(this@MainActivity, "열람기록을 삭제했습니다.", Toast.LENGTH_SHORT).show()
@@ -1340,7 +1346,7 @@ class MainActivity : Activity() {
             background = roundedRect(theme.accent, 12)
             setUiClickListener {
                 appStore.removeBookmark(bookmark.bookmarkId)
-                bookmarks = bookmarks.filterNot { it.bookmarkId == bookmark.bookmarkId }
+                replaceBookmarks(bookmarks.filterNot { it.bookmarkId == bookmark.bookmarkId })
                 rootLayer?.dismissOverlay()
                 showMainScreen()
                 Toast.makeText(this@MainActivity, "책갈피를 삭제했습니다.", Toast.LENGTH_SHORT).show()
@@ -1357,14 +1363,21 @@ class MainActivity : Activity() {
 
     private fun reloadLibraryState() {
         folders = appStore.listFolders()
+        foldersById = folders.associateBy { it.folderId }
         val resolvedActiveFolderId = resolveActiveFolderId()
         if (resolvedActiveFolderId != settings.activeFolderId) {
             settings = settings.copy(activeFolderId = resolvedActiveFolderId)
             settingsStore.save(settings)
         }
         documents = appStore.listDocuments(resolvedActiveFolderId)
+        documentsById = documents.associateBy { it.documentId }
         readingsById = appStore.listReadings().associateBy { it.documentId }
-        bookmarks = appStore.listBookmarks()
+        replaceBookmarks(appStore.listBookmarks())
+    }
+
+    private fun replaceBookmarks(nextBookmarks: List<BookmarkRecord>) {
+        bookmarks = nextBookmarks
+        bookmarkDocumentIds = nextBookmarks.mapTo(mutableSetOf()) { it.documentId }
     }
 
     private fun resumeDocumentForLaunch(): DocumentRecord? {
@@ -1378,7 +1391,7 @@ class MainActivity : Activity() {
         if (!::settingsStore.isInitialized) return
         val document = activeDocument ?: return
         markViewerResume(document.documentId)
-        if (activePages.isNotEmpty()) saveActiveReading()
+        if (activePages.isNotEmpty()) saveActiveReading(pendingViewerAnchorOffset)
     }
 
     private fun markViewerResume(documentId: String) {
@@ -1444,7 +1457,7 @@ class MainActivity : Activity() {
     }
 
     private fun folderName(folderId: String): String {
-        return folders.firstOrNull { it.folderId == folderId }?.displayName ?: "등록 폴더"
+        return foldersById[folderId]?.displayName ?: "등록 폴더"
     }
 
     private fun formatDate(timestamp: Long): String {
@@ -1471,7 +1484,7 @@ class MainActivity : Activity() {
     }
 
     private fun hasBookmark(documentId: String): Boolean {
-        return bookmarks.any { it.documentId == documentId }
+        return documentId in bookmarkDocumentIds
     }
 
     private fun pageBadgeFor(reading: ReadingRecord): String {
@@ -1586,37 +1599,48 @@ class MainActivity : Activity() {
         forceEncoding: String? = null,
     ): ViewerLoadResult {
         val decoded = loadDocumentForViewer(document, forceEncoding)
-        val pages = paginateText(decoded.text)
+        val displayText = normalizeViewerText(decoded.text)
+        val pagination = paginateText(displayText)
         val savedReading = readingsById[document.documentId]
-        val startPageIndex = when {
-            targetOffset != null -> pageIndexForOffset(pages, targetOffset)
-            targetPage != null -> (targetPage - 1).coerceIn(0, pages.size.coerceAtLeast(1) - 1)
-            savedReading != null -> pageIndexForReading(savedReading, pages, decoded.text)
-            else -> 0
+        val anchorOffset = when {
+            targetOffset != null -> targetOffset.coerceIn(0, displayText.length)
+            targetPage != null -> pagination.pages
+                .getOrNull((targetPage - 1).coerceIn(0, pagination.pages.size.coerceAtLeast(1) - 1))
+                ?.startOffset
+                ?: 0
+            savedReading != null -> anchorOffsetForReading(savedReading, pagination.pages, displayText)
+            else -> null
         }
+        val startPageIndex = anchorOffset
+            ?.let { pageIndexForOffset(pagination.pages, it) }
+            ?: 0
         return ViewerLoadResult(
             document = decoded.document,
-            text = decoded.text,
-            pages = pages,
+            text = displayText,
+            pagination = pagination,
             pageIndex = startPageIndex,
             encoding = decoded.document.textEncoding,
+            anchorOffset = anchorOffset,
         )
     }
 
     private fun applyViewerLoadResult(loaded: ViewerLoadResult) {
         activeDocument = loaded.document
         activeDocumentText = loaded.text
-        activePages = loaded.pages
+        applyPaginationResult(loaded.pagination)
         activePageIndex = loaded.pageIndex
         activeEncoding = loaded.encoding
         activeReaderCanvas = null
+        pendingViewerAnchorOffset = loaded.anchorOffset
         markViewerResume(loaded.document.documentId)
     }
 
     private fun showViewerPage(theme: ThemeTokens) {
         handler.removeCallbacksAndMessages(null)
         stopScrollAnimation()
-        saveActiveReading()
+        if (pendingViewerAnchorOffset == null) {
+            saveActiveReading()
+        }
         val canvas = ReaderCanvasView(this).apply {
             this.theme = theme
             readerSettings = settings
@@ -1633,6 +1657,7 @@ class MainActivity : Activity() {
         attachViewerGestures(canvas, theme)
         activeReaderCanvas = canvas
         rootLayer?.setScreenContent(canvas)
+        verifyViewerPaginationFrame(canvas)
     }
 
     private fun attachViewerGestures(canvas: ReaderCanvasView, theme: ThemeTokens) {
@@ -1742,6 +1767,7 @@ class MainActivity : Activity() {
             return false
         }
         val canvas = feedbackView as? ReaderCanvasView
+        pendingViewerAnchorOffset = null
         activePageIndex = next
         playPageTurnFeedback(feedbackView, previous = delta < 0)
         if (canvas != null) {
@@ -1791,255 +1817,32 @@ class MainActivity : Activity() {
     }
 
     private fun initializeSyntheticSounds() {
-        soundPlayer.prepare(
-            mapOf(
-                SyntheticSound.PAGE_PREVIOUS to createPageTurnSoundSamples(
-                    previous = true,
-                    durationSeconds = PAGE_TURN_PREVIOUS_SOUND_SECONDS,
-                ),
-                SyntheticSound.PAGE_NEXT to createPageTurnSoundSamples(
-                    previous = false,
-                    durationSeconds = PAGE_TURN_NEXT_SOUND_SECONDS,
-                ),
-                SyntheticSound.UI_OPEN to createUiOpenSoundSamples(),
-                SyntheticSound.UI_CLOSE to createUiCloseSoundSamples(),
-                SyntheticSound.UI_PRESS to createUiPressSoundSamples(),
-            ),
-        )
+        val runtimeCacheDir = cacheDir
+        Thread {
+            soundPlayer.prepare(runtimeCacheDir)
+            if (activityDestroyed) {
+                soundPlayer.release()
+            }
+        }.apply {
+            name = "DurumariSoundInit"
+            isDaemon = true
+            start()
+        }
     }
 
     private fun playSyntheticPageTurnSound(previous: Boolean) {
-        soundPlayer.play(if (previous) SyntheticSound.PAGE_PREVIOUS else SyntheticSound.PAGE_NEXT)
+        soundPlayer.playPageTurn(previous)
     }
 
     private fun playSyntheticUiSound(kind: UiFeedbackKind) {
-        val sound = when (kind) {
-            UiFeedbackKind.OPEN -> SyntheticSound.UI_OPEN
-            UiFeedbackKind.CLOSE -> SyntheticSound.UI_CLOSE
-            UiFeedbackKind.PRESS -> SyntheticSound.UI_PRESS
-        }
-        soundPlayer.play(sound)
+        soundPlayer.playUi(kind.toUiSoundKind())
     }
 
-    private fun createUiOpenSoundSamples(): ShortArray {
-        return createCyberUiSoundSamples(
-            durationSeconds = UI_OPEN_SOUND_SECONDS,
-            startHz = UI_OPEN_START_HZ,
-            endHz = UI_OPEN_END_HZ,
-            outputGain = UI_OPEN_OUTPUT_GAIN,
-            shimmerGain = UI_OPEN_SHIMMER_GAIN,
-            growlGain = UI_OPEN_GROWL_GAIN,
-            noiseGain = UI_OPEN_NOISE_GAIN,
-            decay = UI_OPEN_DECAY,
-        )
-    }
-
-    private fun createUiCloseSoundSamples(): ShortArray {
-        return createCyberUiSoundSamples(
-            durationSeconds = UI_CLOSE_SOUND_SECONDS,
-            startHz = UI_CLOSE_START_HZ,
-            endHz = UI_CLOSE_END_HZ,
-            outputGain = UI_CLOSE_OUTPUT_GAIN,
-            shimmerGain = UI_CLOSE_SHIMMER_GAIN,
-            growlGain = UI_CLOSE_GROWL_GAIN,
-            noiseGain = UI_CLOSE_NOISE_GAIN,
-            decay = UI_CLOSE_DECAY,
-        )
-    }
-
-    private fun createUiPressSoundSamples(): ShortArray {
-        return createCyberUiSoundSamples(
-            durationSeconds = UI_PRESS_SOUND_SECONDS,
-            startHz = UI_PRESS_START_HZ,
-            endHz = UI_PRESS_END_HZ,
-            outputGain = UI_PRESS_OUTPUT_GAIN,
-            shimmerGain = UI_PRESS_SHIMMER_GAIN,
-            growlGain = UI_PRESS_GROWL_GAIN,
-            noiseGain = UI_PRESS_NOISE_GAIN,
-            decay = UI_PRESS_DECAY,
-        )
-    }
-
-    private fun createCyberUiSoundSamples(
-        durationSeconds: Double,
-        startHz: Double,
-        endHz: Double,
-        outputGain: Double,
-        shimmerGain: Double,
-        growlGain: Double,
-        noiseGain: Double,
-        decay: Double,
-    ): ShortArray {
-        val sampleCount = max(1, (SOUND_SAMPLE_RATE * durationSeconds).roundToInt())
-        val samples = ShortArray(sampleCount)
-        var energyPhase = 0.0
-        var modulationPhase = 0.0
-        var shimmerPhase = 0.0
-        val frequencyRatio = endHz / startHz
-        for (index in samples.indices) {
-            val t = index.toDouble() / sampleCount.toDouble()
-            val attack = (t / UI_SOUND_ATTACK_RATIO).coerceIn(0.0, 1.0)
-            val release = ((1.0 - t) / (1.0 - UI_SOUND_ATTACK_RATIO)).coerceIn(0.0, 1.0)
-            val envelope = attack * release.pow(decay)
-            val modulationFrequency = UI_SOUND_MOD_START_HZ + (UI_SOUND_MOD_END_HZ - UI_SOUND_MOD_START_HZ) * t
-            modulationPhase += (2.0 * PI * modulationFrequency) / SOUND_SAMPLE_RATE
-            val frequency = (startHz * frequencyRatio.pow(t)) +
-                sin(modulationPhase) * UI_SOUND_MOD_DEPTH_HZ * (1.0 - t)
-            val shimmerFrequency = UI_SOUND_SHIMMER_START_HZ +
-                (UI_SOUND_SHIMMER_END_HZ - UI_SOUND_SHIMMER_START_HZ) * t
-            energyPhase += (2.0 * PI * frequency) / SOUND_SAMPLE_RATE
-            shimmerPhase += (2.0 * PI * shimmerFrequency) / SOUND_SAMPLE_RATE
-
-            val tremolo = UI_SOUND_TREMOLO_BASE + sin(modulationPhase) * UI_SOUND_TREMOLO_DEPTH
-            val core = sin(energyPhase) * UI_SOUND_CORE_GAIN
-            val growl = sin(energyPhase * UI_SOUND_GROWL_MULTIPLIER) * growlGain
-            val shimmer = sin(shimmerPhase) * shimmerGain
-            val air = ((Random.nextDouble() * 2.0) - 1.0) * noiseGain * (1.0 - t).pow(0.45)
-            val output = bitCrush((core + growl + shimmer + air) * envelope * tremolo * outputGain, UI_SOUND_CRUSH_LEVELS)
-            samples[index] = toPcm16(output)
-        }
-        return samples
-    }
-
-    private fun createPageTurnSoundSamples(previous: Boolean, durationSeconds: Double): ShortArray {
-        val sampleCount = max(1, (SOUND_SAMPLE_RATE * durationSeconds).roundToInt())
-        val samples = ShortArray(sampleCount)
-        var low = 0.0
-        var band = 0.0
-        val startFrequency = if (previous) PAGE_TURN_PREVIOUS_START_HZ else PAGE_TURN_NEXT_START_HZ
-        val endFrequency = if (previous) PAGE_TURN_PREVIOUS_END_HZ else PAGE_TURN_NEXT_END_HZ
-        val frequencyRatio = endFrequency / startFrequency
-
-        for (index in samples.indices) {
-            val t = index.toDouble() / sampleCount.toDouble()
-            val envelope = sin(PI * t) * (1.0 - t).pow(PAGE_TURN_SOUND_DECAY)
-            val noise = (Random.nextDouble() * 2.0) - 1.0
-            val frequency = startFrequency * frequencyRatio.pow(t)
-            val filterAmount = 2.0 * sin(PI * frequency / SOUND_SAMPLE_RATE)
-            val high = noise - low - (PAGE_TURN_SOUND_FILTER_DAMPING * band)
-            band += filterAmount * high
-            low += filterAmount * band
-            val output = band * envelope * PAGE_TURN_SOUND_NOISE_GAIN * PAGE_TURN_SOUND_OUTPUT_GAIN
-            samples[index] = toPcm16(output)
-        }
-        return samples
-    }
-
-    private fun bitCrush(value: Double, levels: Double): Double {
-        return (value * levels).roundToInt() / levels
-    }
-
-    private fun toPcm16(value: Double): Short {
-        return (value * Short.MAX_VALUE).roundToInt()
-            .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
-            .toShort()
-    }
-
-    private inner class SyntheticSoundPlayer {
-        private var soundPool: SoundPool? = null
-        private val soundIds = mutableMapOf<SyntheticSound, Int>()
-        private val loadedSoundIds = mutableSetOf<Int>()
-        private val pendingSoundIds = mutableSetOf<Int>()
-
-        @Synchronized
-        fun prepare(samplesBySound: Map<SyntheticSound, ShortArray>) {
-            release()
-            val attributes = AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_MEDIA)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                .build()
-            val pool = SoundPool.Builder()
-                .setMaxStreams(SOUND_POOL_MAX_STREAMS)
-                .setAudioAttributes(attributes)
-                .build()
-            pool.setOnLoadCompleteListener { _, sampleId, status ->
-                if (status == 0) {
-                    var shouldPlay = false
-                    synchronized(this) {
-                        loadedSoundIds.add(sampleId)
-                        shouldPlay = pendingSoundIds.remove(sampleId)
-                    }
-                    if (shouldPlay) {
-                        pool.play(sampleId, 1f, 1f, 1, 0, 1f)
-                    }
-                }
-            }
-            soundPool = pool
-            samplesBySound.forEach { (sound, samples) ->
-                createRuntimeWavFile(sound, samples)?.let { file ->
-                    val soundId = pool.load(file.absolutePath, 1)
-                    if (soundId != 0) {
-                        soundIds[sound] = soundId
-                    }
-                }
-            }
-        }
-
-        @Synchronized
-        fun play(sound: SyntheticSound) {
-            val pool = soundPool ?: return
-            val soundId = soundIds[sound] ?: return
-            if (!loadedSoundIds.contains(soundId)) {
-                pendingSoundIds.add(soundId)
-                return
-            }
-            pool.play(soundId, 1f, 1f, 1, 0, 1f)
-        }
-
-        @Synchronized
-        fun release() {
-            soundPool?.release()
-            soundPool = null
-            soundIds.clear()
-            loadedSoundIds.clear()
-            pendingSoundIds.clear()
-        }
-
-        private fun createRuntimeWavFile(sound: SyntheticSound, samples: ShortArray): File? {
-            if (samples.isEmpty()) return null
-            return runCatching {
-                val file = File(cacheDir, "durumari-${sound.name.lowercase(Locale.ROOT)}.wav")
-                file.outputStream().use { output ->
-                    writeWav(output, samples)
-                }
-                file
-            }.getOrNull()
-        }
-
-        private fun writeWav(output: java.io.OutputStream, samples: ShortArray) {
-            val dataSize = samples.size * Short.SIZE_BYTES
-            output.writeAscii("RIFF")
-            output.writeIntLe(WAV_RIFF_CHUNK_OVERHEAD_BYTES + dataSize)
-            output.writeAscii("WAVE")
-            output.writeAscii("fmt ")
-            output.writeIntLe(16)
-            output.writeShortLe(1)
-            output.writeShortLe(1)
-            output.writeIntLe(SOUND_SAMPLE_RATE)
-            output.writeIntLe(SOUND_SAMPLE_RATE * Short.SIZE_BYTES)
-            output.writeShortLe(Short.SIZE_BYTES)
-            output.writeShortLe(16)
-            output.writeAscii("data")
-            output.writeIntLe(dataSize)
-            samples.forEach { sample ->
-                output.writeShortLe(sample.toInt())
-            }
-        }
-
-        private fun java.io.OutputStream.writeAscii(value: String) {
-            write(value.toByteArray(Charsets.US_ASCII))
-        }
-
-        private fun java.io.OutputStream.writeIntLe(value: Int) {
-            write(value and 0xff)
-            write((value ushr 8) and 0xff)
-            write((value ushr 16) and 0xff)
-            write((value ushr 24) and 0xff)
-        }
-
-        private fun java.io.OutputStream.writeShortLe(value: Int) {
-            write(value and 0xff)
-            write((value ushr 8) and 0xff)
+    private fun UiFeedbackKind.toUiSoundKind(): UiSoundKind {
+        return when (this) {
+            UiFeedbackKind.OPEN -> UiSoundKind.OPEN
+            UiFeedbackKind.CLOSE -> UiSoundKind.CLOSE
+            UiFeedbackKind.PRESS -> UiSoundKind.PRESS
         }
     }
 
@@ -2264,7 +2067,7 @@ class MainActivity : Activity() {
                         showViewerLoadingThenPage(
                             theme = theme,
                             document = document,
-                            targetOffset = anchorOffsetForPage(activePageIndex),
+                            targetOffset = currentViewerAnchorOffset(),
                             forceEncoding = option.value,
                         )
                     }
@@ -2288,15 +2091,22 @@ class MainActivity : Activity() {
         return decoded
     }
 
-    private fun paginateText(text: String): List<ReaderCanvasView.PageSlice> {
+    private fun paginateText(
+        text: String,
+        measuredWidthPx: Int? = null,
+        measuredHeightPx: Int? = null,
+    ): PaginationResult {
         val metrics = resources.displayMetrics
         val root = rootLayer
-        val contentWidth = root?.contentFrameWidthPx?.takeIf { it > 0 } ?: metrics.widthPixels
-        val contentHeight = root?.contentFrameHeightPx?.takeIf { it > 0 }
+        val contentWidth = measuredWidthPx?.takeIf { it > 0 }
+            ?: root?.contentFrameWidthPx?.takeIf { it > 0 }
+            ?: metrics.widthPixels
+        val contentHeight = measuredHeightPx?.takeIf { it > 0 }
+            ?: root?.contentFrameHeightPx?.takeIf { it > 0 }
             ?: (metrics.heightPixels - safeTopInset - safeBottomInset).coerceAtLeast(1)
-        return ReaderCanvasView.paginate(
+        return paginateTextForFrame(
             text = text,
-            settings = settings,
+            readerSettings = settings,
             typeface = loadReaderTypeface(settings),
             widthPx = contentWidth,
             heightPx = contentHeight,
@@ -2304,20 +2114,146 @@ class MainActivity : Activity() {
         )
     }
 
-    private fun saveActiveReading() {
+    private fun paginateTextForFrame(
+        text: String,
+        readerSettings: ReaderSettings,
+        typeface: Typeface,
+        widthPx: Int,
+        heightPx: Int,
+        density: Float,
+    ): PaginationResult {
+        return PaginationResult(
+            pages = ReaderCanvasView.paginate(
+                text = text,
+                settings = readerSettings,
+                typeface = typeface,
+                widthPx = widthPx,
+                heightPx = heightPx,
+                density = density,
+            ),
+            widthPx = widthPx,
+            heightPx = heightPx,
+        )
+    }
+
+    private fun applyPaginationResult(pagination: PaginationResult) {
+        activePages = pagination.pages
+        activePaginationWidthPx = pagination.widthPx
+        activePaginationHeightPx = pagination.heightPx
+    }
+
+    private fun verifyViewerPaginationFrame(canvas: ReaderCanvasView) {
+        var checked = false
+        lateinit var listener: View.OnLayoutChangeListener
+
+        fun check(view: View, widthPx: Int, heightPx: Int) {
+            if (checked || widthPx <= 0 || heightPx <= 0) return
+            checked = true
+            view.removeOnLayoutChangeListener(listener)
+            repaginateForMeasuredCanvasIfNeeded(canvas, widthPx, heightPx)
+        }
+
+        listener = View.OnLayoutChangeListener { view, left, top, right, bottom, _, _, _, _ ->
+            check(view, right - left, bottom - top)
+        }
+        canvas.addOnLayoutChangeListener(listener)
+        canvas.post {
+            check(canvas, canvas.width, canvas.height)
+        }
+    }
+
+    private fun repaginateForMeasuredCanvasIfNeeded(
+        canvas: ReaderCanvasView,
+        widthPx: Int,
+        heightPx: Int,
+    ) {
+        val text = activeDocumentText ?: return
+        if (activePages.isEmpty()) return
+        val pendingAnchor = pendingViewerAnchorOffset
+        val needsPagination = activePaginationWidthPx != widthPx || activePaginationHeightPx != heightPx
+        if (!needsPagination && pendingAnchor == null) return
+
+        if (needsPagination) {
+            val requestId = ++paginationRequestId
+            val documentId = activeDocument?.documentId
+            val settingsSnapshot = settings
+            val typefaceSnapshot = loadReaderTypeface(settingsSnapshot)
+            val density = resources.displayMetrics.density
+            Thread {
+                val result = runCatching {
+                    paginateTextForFrame(
+                        text = text,
+                        readerSettings = settingsSnapshot,
+                        typeface = typefaceSnapshot,
+                        widthPx = widthPx,
+                        heightPx = heightPx,
+                        density = density,
+                    )
+                }
+                runOnUiThread {
+                    val pagination = result.getOrNull() ?: return@runOnUiThread
+                    if (
+                        activityDestroyed ||
+                        paginationRequestId != requestId ||
+                        activeReaderCanvas !== canvas ||
+                        activeDocument?.documentId != documentId ||
+                        activeDocumentText !== text ||
+                        settings != settingsSnapshot
+                    ) {
+                        return@runOnUiThread
+                    }
+                    val targetOffset = pendingViewerAnchorOffset ?: anchorOffsetForPage(activePageIndex)
+                    applyPaginationResult(pagination)
+                    applyMeasuredPaginationToCanvas(canvas, targetOffset)
+                }
+            }.apply {
+                name = "DurumariPagination"
+                start()
+            }
+            return
+        }
+
+        val targetOffset = pendingAnchor ?: anchorOffsetForPage(activePageIndex)
+        applyMeasuredPaginationToCanvas(canvas, targetOffset)
+    }
+
+    private fun applyMeasuredPaginationToCanvas(canvas: ReaderCanvasView, targetOffset: Int) {
+        activePageIndex = pageIndexForOffset(activePages, targetOffset)
+        syncBookmarksForActivePages()
+        canvas.readerSettings = settings
+        canvas.readerTypeface = loadReaderTypeface(settings)
+        canvas.pageText = pageTextForPage(activePageIndex)
+        canvas.pageNumberText = "${activePageIndex + 1} / ${activePages.size.coerceAtLeast(1)}"
+        canvas.bookmarkActive = isBookmarkActiveForPage(activePageIndex)
+        pendingViewerAnchorOffset = null
+        saveActiveReading()
+    }
+
+    private fun normalizeViewerText(text: String): String {
+        return if (text.indexOf('\r') >= 0) {
+            text.replace("\r\n", "\n").replace('\r', '\n')
+        } else {
+            text
+        }
+    }
+
+    private fun saveActiveReading(anchorOffsetOverride: Int? = null) {
         val document = activeDocument ?: return
         val total = activePages.size.coerceAtLeast(1)
-        val current = (activePageIndex + 1).coerceIn(1, total)
+        val resolvedPageIndex = anchorOffsetOverride
+            ?.let { pageIndexForOffset(activePages, it) }
+            ?: activePageIndex
+        val current = (resolvedPageIndex + 1).coerceIn(1, total)
         val now = System.currentTimeMillis()
         val reading = ReadingRecord(
             documentId = document.documentId,
             lastPage = current,
             totalPages = total,
-            progress = progressForPageIndex(activePageIndex),
+            progress = progressForPageIndex(resolvedPageIndex),
             openedAt = now,
             completed = current >= total,
             completedAt = if (current >= total) now else null,
-            anchorOffset = anchorOffsetForPage(activePageIndex),
+            anchorOffset = anchorOffsetOverride ?: anchorOffsetForPage(resolvedPageIndex),
         )
         appStore.upsertReading(reading)
         readingsById = readingsById + (document.documentId to reading)
@@ -2327,19 +2263,29 @@ class MainActivity : Activity() {
         val document = activeDocument ?: return
         val total = activePages.size.coerceAtLeast(1)
         val current = (activePageIndex + 1).coerceIn(1, total)
-        val pageText = pageTextForPage(activePageIndex)
-        val preview = pageText.replace(Regex("\\s+"), " ").trim().take(140).ifBlank { document.title }
-        val bookmark = BookmarkRecord(
-            bookmarkId = stableId("${document.documentId}:p$current"),
-            documentId = document.documentId,
-            page = current,
-            totalPages = total,
-            progress = progressForPageIndex(activePageIndex),
-            preview = preview,
-            createdAt = System.currentTimeMillis(),
-            anchorOffset = anchorOffsetForPage(activePageIndex),
-        )
-        val added = appStore.toggleBookmark(bookmark)
+        val text = activeDocumentText.orEmpty()
+        val existing = bookmarks.firstOrNull { bookmark ->
+            bookmark.documentId == document.documentId &&
+                bookmarkBelongsToPage(bookmark, activePageIndex, text)
+        }
+        val added = existing == null
+        if (existing != null) {
+            appStore.removeBookmark(existing.bookmarkId)
+        } else {
+            val pageText = pageTextForPage(activePageIndex)
+            val preview = compactWhitespace(pageText).take(140).ifBlank { document.title }
+            val bookmark = BookmarkRecord(
+                bookmarkId = stableId("${document.documentId}:p$current"),
+                documentId = document.documentId,
+                page = current,
+                totalPages = total,
+                progress = progressForPageIndex(activePageIndex),
+                preview = preview,
+                createdAt = System.currentTimeMillis(),
+                anchorOffset = currentViewerAnchorOffset(),
+            )
+            appStore.upsertBookmarks(listOf(bookmark))
+        }
         reloadLibraryState()
         rootLayer?.dismissOverlay()
         showViewerPage(theme)
@@ -2348,6 +2294,10 @@ class MainActivity : Activity() {
 
     private fun anchorOffsetForPage(pageIndex: Int): Int {
         return activePages.getOrNull(pageIndex.coerceIn(0, activePages.size.coerceAtLeast(1) - 1))?.startOffset ?: 0
+    }
+
+    private fun currentViewerAnchorOffset(): Int {
+        return pendingViewerAnchorOffset ?: anchorOffsetForPage(activePageIndex)
     }
 
     private fun progressForPageIndex(pageIndex: Int): Float {
@@ -2359,28 +2309,35 @@ class MainActivity : Activity() {
         if (pages.isEmpty()) return 0
         val textLength = pages.lastOrNull()?.endOffset ?: 0
         val safeOffset = offset.coerceIn(0, textLength.coerceAtLeast(0))
-        val index = pages.indexOfLast { it.startOffset <= safeOffset }
-        return index.coerceIn(0, pages.size - 1)
+        var low = 0
+        var high = pages.lastIndex
+        var result = 0
+        while (low <= high) {
+            val mid = (low + high) ushr 1
+            if (pages[mid].startOffset <= safeOffset) {
+                result = mid
+                low = mid + 1
+            } else {
+                high = mid - 1
+            }
+        }
+        return result.coerceIn(0, pages.size - 1)
     }
 
-    private fun pageIndexForReading(
+    private fun anchorOffsetForReading(
         reading: ReadingRecord,
         pages: List<ReaderCanvasView.PageSlice>,
         text: String,
     ): Int {
-        val offset = reading.anchorOffset
+        return reading.anchorOffset
             ?: (reading.progress * text.length.coerceAtLeast(0)).roundToInt()
                 .takeIf { reading.progress > 0f }
             ?: pages.getOrNull(reading.lastPage - 1)?.startOffset
             ?: 0
-        return pageIndexForOffset(pages, offset)
     }
 
     private fun previewForPage(pageIndex: Int): String {
-        return pageTextForPage(pageIndex)
-            .replace(Regex("\\s+"), " ")
-            .trim()
-            .take(140)
+        return compactWhitespace(pageTextForPage(pageIndex)).take(140)
     }
 
     private fun pageTextForPage(pageIndex: Int): String {
@@ -2394,7 +2351,24 @@ class MainActivity : Activity() {
 
     private fun isBookmarkActiveForPage(pageIndex: Int): Boolean {
         val documentId = activeDocument?.documentId ?: return false
-        return bookmarks.any { it.documentId == documentId && it.page == pageIndex + 1 }
+        val text = activeDocumentText.orEmpty()
+        return bookmarks.any { bookmark ->
+            bookmark.documentId == documentId &&
+                bookmarkBelongsToPage(bookmark, pageIndex, text)
+        }
+    }
+
+    private fun bookmarkBelongsToPage(bookmark: BookmarkRecord, pageIndex: Int, text: String): Boolean {
+        val page = activePages.getOrNull(pageIndex) ?: return false
+        val textLength = text.length.coerceAtLeast(0)
+        val start = page.startOffset.coerceIn(0, textLength)
+        val end = page.endOffset.coerceIn(start, textLength)
+        val offset = resolveBookmarkAnchorOffset(bookmark, text)
+        return if (pageIndex == activePages.lastIndex) {
+            offset in start..end
+        } else {
+            offset in start until end
+        }
     }
 
     private fun syncBookmarksForActivePages() {
@@ -2424,7 +2398,7 @@ class MainActivity : Activity() {
         }
         if (changed.isNotEmpty()) {
             appStore.upsertBookmarks(changed)
-            bookmarks = nextBookmarks
+            replaceBookmarks(nextBookmarks)
         }
     }
 
@@ -2439,7 +2413,7 @@ class MainActivity : Activity() {
     }
 
     private fun findPreviewOffset(preview: String, text: String): Int? {
-        val needle = preview.replace(Regex("\\s+"), " ").trim()
+        val needle = compactWhitespace(preview)
         if (needle.isBlank()) return null
         val direct = text.indexOf(needle)
         if (direct >= 0) return direct
@@ -2462,6 +2436,10 @@ class MainActivity : Activity() {
         }
         val normalizedIndex = normalizedChars.indexOf(needle)
         return if (normalizedIndex >= 0) offsets.getOrNull(normalizedIndex) else null
+    }
+
+    private fun compactWhitespace(value: String): String {
+        return WHITESPACE_REGEX.replace(value, " ").trim()
     }
 
     private fun createSheetSurface(theme: ThemeTokens): LinearLayout {
@@ -2613,7 +2591,7 @@ class MainActivity : Activity() {
             setUiClickListener {
                 val previous = settings
                 val targetOffset = if (viewerWasOpen && activeDocumentText != null && paginationSettingsChanged(previous, draftSettings)) {
-                    anchorOffsetForPage(activePageIndex)
+                    currentViewerAnchorOffset()
                 } else {
                     null
                 }
@@ -2625,8 +2603,11 @@ class MainActivity : Activity() {
                     val theme = DurumariThemes.tokens(settings.theme)
                     val needsPagination = activeDocumentText != null && paginationSettingsChanged(previous, settings)
                     if (needsPagination) {
-                        activePages = paginateText(activeDocumentText.orEmpty())
-                        activePageIndex = pageIndexForOffset(activePages, targetOffset ?: anchorOffsetForPage(activePageIndex))
+                        val pagination = paginateText(activeDocumentText.orEmpty())
+                        applyPaginationResult(pagination)
+                        val resolvedTargetOffset = targetOffset ?: currentViewerAnchorOffset()
+                        activePageIndex = pageIndexForOffset(activePages, resolvedTargetOffset)
+                        pendingViewerAnchorOffset = resolvedTargetOffset
                         syncBookmarksForActivePages()
                     }
                     val needsRedraw = needsPagination || previous.theme != settings.theme
@@ -3847,54 +3828,6 @@ class MainActivity : Activity() {
         private const val SWIPE_CONFIRM_RATIO = 0.20f
         private const val WHEEL_TURN_THROTTLE_MS = 300L
         private const val PREVIEW_PAGE_NUMBER_RESERVED_DP = 34
-        private const val SOUND_SAMPLE_RATE = 44100
-        private const val SOUND_POOL_MAX_STREAMS = 4
-        private const val WAV_RIFF_CHUNK_OVERHEAD_BYTES = 36
-        private const val PAGE_TURN_PREVIOUS_SOUND_SECONDS = 0.14
-        private const val PAGE_TURN_NEXT_SOUND_SECONDS = 0.19
-        private const val PAGE_TURN_PREVIOUS_START_HZ = 900.0
-        private const val PAGE_TURN_PREVIOUS_END_HZ = 1800.0
-        private const val PAGE_TURN_NEXT_START_HZ = 1600.0
-        private const val PAGE_TURN_NEXT_END_HZ = 3100.0
-        private const val PAGE_TURN_SOUND_NOISE_GAIN = 0.12
-        private const val PAGE_TURN_SOUND_OUTPUT_GAIN = 0.72
-        private const val PAGE_TURN_SOUND_DECAY = 0.8
-        private const val PAGE_TURN_SOUND_FILTER_DAMPING = 0.45
-        private const val UI_OPEN_SOUND_SECONDS = 0.18
-        private const val UI_OPEN_START_HZ = 220.0
-        private const val UI_OPEN_END_HZ = 980.0
-        private const val UI_OPEN_OUTPUT_GAIN = 0.46
-        private const val UI_OPEN_SHIMMER_GAIN = 0.22
-        private const val UI_OPEN_GROWL_GAIN = 0.24
-        private const val UI_OPEN_NOISE_GAIN = 0.052
-        private const val UI_OPEN_DECAY = 0.64
-        private const val UI_CLOSE_SOUND_SECONDS = 0.15
-        private const val UI_CLOSE_START_HZ = 880.0
-        private const val UI_CLOSE_END_HZ = 240.0
-        private const val UI_CLOSE_OUTPUT_GAIN = 0.40
-        private const val UI_CLOSE_SHIMMER_GAIN = 0.14
-        private const val UI_CLOSE_GROWL_GAIN = 0.30
-        private const val UI_CLOSE_NOISE_GAIN = 0.042
-        private const val UI_CLOSE_DECAY = 1.05
-        private const val UI_PRESS_SOUND_SECONDS = 0.075
-        private const val UI_PRESS_START_HZ = 520.0
-        private const val UI_PRESS_END_HZ = 720.0
-        private const val UI_PRESS_OUTPUT_GAIN = 0.34
-        private const val UI_PRESS_SHIMMER_GAIN = 0.16
-        private const val UI_PRESS_GROWL_GAIN = 0.18
-        private const val UI_PRESS_NOISE_GAIN = 0.035
-        private const val UI_PRESS_DECAY = 1.6
-        private const val UI_SOUND_ATTACK_RATIO = 0.08
-        private const val UI_SOUND_MOD_START_HZ = 34.0
-        private const val UI_SOUND_MOD_END_HZ = 170.0
-        private const val UI_SOUND_MOD_DEPTH_HZ = 92.0
-        private const val UI_SOUND_SHIMMER_START_HZ = 1800.0
-        private const val UI_SOUND_SHIMMER_END_HZ = 5200.0
-        private const val UI_SOUND_CORE_GAIN = 0.72
-        private const val UI_SOUND_GROWL_MULTIPLIER = 2.03
-        private const val UI_SOUND_TREMOLO_BASE = 0.84
-        private const val UI_SOUND_TREMOLO_DEPTH = 0.16
-        private const val UI_SOUND_CRUSH_LEVELS = 44.0
         private const val INTRO_STATUS_INIT = "앱 초기화 중..."
         private const val INTRO_STATUS_LOCAL_FOLDERS = "로컬 폴더를 확인하는 중..."
         private const val INTRO_STATUS_LAST_VIEWER = "마지막으로 읽던 문서를 확인하는 중..."
@@ -3902,5 +3835,6 @@ class MainActivity : Activity() {
         private const val VIEWER_STATUS_TEXT_LOADING = "본문을 불러오는 중..."
         private const val VIEWER_STATUS_REENCODING = "새로운 인코딩으로 문서를 불러오는 중..."
         private const val VIEWER_STATUS_PAGINATION = "전체 페이지를 계산하는 중..."
+        private val WHITESPACE_REGEX = Regex("\\s+")
     }
 }

@@ -38,16 +38,19 @@ class ReaderCanvasView @JvmOverloads constructor(
     var theme: ThemeTokens = DurumariThemes.paper
         set(value) {
             field = value
+            clearPageLayoutCache()
             invalidate()
         }
     var readerSettings: ReaderSettings = ReaderSettings()
         set(value) {
             field = value
+            clearPageLayoutCache()
             invalidate()
         }
     var readerTypeface: Typeface = Typeface.SANS_SERIF
         set(value) {
             field = value
+            clearPageLayoutCache()
             invalidate()
         }
     var pageText: String = "문서를 열어주세요."
@@ -77,6 +80,11 @@ class ReaderCanvasView @JvmOverloads constructor(
     private val stripPath = Path()
     private val stripMatrix = Matrix()
     private val contentRect = RectF()
+    private val pageLayoutCache = object : LinkedHashMap<TextLayoutKey, StaticLayout>(TEXT_LAYOUT_CACHE_SIZE, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<TextLayoutKey, StaticLayout>?): Boolean {
+            return size > TEXT_LAYOUT_CACHE_SIZE
+        }
+    }
     private var pageTurnAnimator: ValueAnimator? = null
     private var boundaryAnimator: ValueAnimator? = null
     private var boundaryOffsetX: Float = 0f
@@ -87,7 +95,12 @@ class ReaderCanvasView @JvmOverloads constructor(
         val text: String,
         val startOffset: Int,
         val endOffset: Int,
-    )
+        val startLine: Int = 0,
+        val endLine: Int = 0,
+    ) {
+        val lineCount: Int
+            get() = (endLine - startLine).coerceAtLeast(0)
+    }
 
     enum class TurnAxis {
         HORIZONTAL,
@@ -115,6 +128,18 @@ class ReaderCanvasView @JvmOverloads constructor(
         val topY: Float,
         val bottomX: Float,
         val bottomY: Float,
+    )
+
+    private data class TextLayoutKey(
+        val text: String,
+        val contentWidth: Int,
+        val color: Int,
+        val fontSize: Int,
+        val isBold: Boolean,
+        val lineHeight: Float,
+        val letterSpacing: Float,
+        val typefaceId: Int,
+        val density: Float,
     )
 
     override fun onDraw(canvas: Canvas) {
@@ -229,9 +254,17 @@ class ReaderCanvasView @JvmOverloads constructor(
         boundaryAnimator = null
         boundaryOffsetX = 0f
         boundaryOffsetY = 0f
+        clearPageLayoutCache()
         recycleTransitionSurfaces()
         transition = null
         super.onDetachedFromWindow()
+    }
+
+    override fun onSizeChanged(width: Int, height: Int, oldWidth: Int, oldHeight: Int) {
+        super.onSizeChanged(width, height, oldWidth, oldHeight)
+        if (width != oldWidth || height != oldHeight) {
+            clearPageLayoutCache()
+        }
     }
 
     private fun drawTransition(canvas: Canvas, transition: PageTransition) {
@@ -511,7 +544,7 @@ class ReaderCanvasView @JvmOverloads constructor(
 
         configureTextPaint(textPaint, readerSettings, readerTypeface, theme.text, density)
 
-        val layout = createStaticLayout(
+        val layout = getPageLayout(
             text = text,
             paint = textPaint,
             width = contentWidth,
@@ -531,6 +564,39 @@ class ReaderCanvasView @JvmOverloads constructor(
             .coerceAtMost(height - 12f * density)
         canvas.drawText(numberText, width / 2f, pageNumberY, pageNumberPaint)
         canvas.restore()
+    }
+
+    private fun getPageLayout(
+        text: String,
+        paint: TextPaint,
+        width: Int,
+        spacingMultiplier: Float,
+    ): StaticLayout {
+        val key = TextLayoutKey(
+            text = text,
+            contentWidth = width,
+            color = theme.text,
+            fontSize = readerSettings.fontSize,
+            isBold = readerSettings.isBold,
+            lineHeight = readerSettings.lineHeight,
+            letterSpacing = readerSettings.letterSpacing,
+            typefaceId = System.identityHashCode(readerTypeface),
+            density = resources.displayMetrics.density,
+        )
+        pageLayoutCache[key]?.let { return it }
+
+        val layout = createStaticLayout(
+            text = text,
+            paint = TextPaint(paint),
+            width = width,
+            spacingMultiplier = spacingMultiplier,
+        )
+        pageLayoutCache[key] = layout
+        return layout
+    }
+
+    private fun clearPageLayoutCache() {
+        pageLayoutCache.clear()
     }
 
     private fun drawSlideShadow(canvas: Canvas, edge: Float, vertical: Boolean, progress: Float) {
@@ -619,6 +685,7 @@ class ReaderCanvasView @JvmOverloads constructor(
         private const val BOOK_SPINE_SHADOW_PX = 54f
         private const val BOOK_STRIP_MIN_PX = 8f
         private const val BOOK_STRIP_COUNT = 56f
+        private const val TEXT_LAYOUT_CACHE_SIZE = 3
         private val PAGE_TURN_INTERPOLATOR = TimeInterpolator { input ->
             if (input < 0.5f) {
                 4f * input * input * input
@@ -636,7 +703,7 @@ class ReaderCanvasView @JvmOverloads constructor(
             heightPx: Int,
             density: Float,
         ): List<PageSlice> {
-            val normalized = text.replace("\r\n", "\n").replace('\r', '\n')
+            val normalized = normalizeLineEndings(text)
             if (normalized.isBlank()) {
                 return listOf(PageSlice("문서에 표시할 텍스트가 없습니다.", 0, 0))
             }
@@ -656,8 +723,7 @@ class ReaderCanvasView @JvmOverloads constructor(
             )
             val pages = mutableListOf<PageSlice>()
             var startLine = 0
-            val targetLineHeight = (paint.textSize * settings.lineHeight).coerceAtLeast(1f)
-            val pageHeightLimit = (contentHeight - max(PAGE_BOTTOM_GUARD_DP * density, targetLineHeight)).coerceAtLeast(1f)
+            val pageHeightLimit = (contentHeight - PAGE_BOTTOM_GUARD_DP * density).coerceAtLeast(1f)
             while (startLine < layout.lineCount) {
                 val pageTop = layout.getLineTop(startLine)
                 var endLine = startLine
@@ -671,9 +737,12 @@ class ReaderCanvasView @JvmOverloads constructor(
 
                 val start = layout.getLineStart(startLine).coerceIn(0, normalized.length)
                 while (endLine > startLine + 1) {
-                    val candidateEnd = layout.getLineEnd(endLine - 1).coerceIn(start, normalized.length)
-                    val candidateText = normalized.substring(start, candidateEnd).trimEnd()
-                    if (fitsContentHeight(candidateText, paint, contentWidth, pageHeightLimit, settings)) break
+                    val candidateEnd = trimmedEnd(
+                        text = normalized,
+                        start = start,
+                        end = layout.getLineEnd(endLine - 1).coerceIn(start, normalized.length),
+                    )
+                    if (fitsContentHeight(normalized, start, candidateEnd, paint, contentWidth, pageHeightLimit, settings)) break
                     endLine -= 1
                 }
 
@@ -684,31 +753,53 @@ class ReaderCanvasView @JvmOverloads constructor(
                         text = "",
                         startOffset = start,
                         endOffset = end,
+                        startLine = startLine,
+                        endLine = endLine,
                     ),
                 )
                 startLine = endLine
             }
             return pages.ifEmpty {
-                listOf(PageSlice(normalized, 0, normalized.length))
+                listOf(PageSlice(normalized, 0, normalized.length, startLine = 0, endLine = layout.lineCount))
             }
         }
 
         private fun fitsContentHeight(
-            text: String,
+            text: CharSequence,
+            start: Int,
+            end: Int,
             paint: TextPaint,
             width: Int,
             heightLimit: Float,
             settings: ReaderSettings,
         ): Boolean {
-            if (text.isEmpty()) return true
+            if (end <= start) return true
             val pageLayout = createStaticLayout(
                 text = text,
+                start = start,
+                end = end,
                 paint = paint,
                 width = width,
                 spacingMultiplier = effectiveLineSpacingMultiplier(paint, settings),
             )
             if (pageLayout.lineCount == 0) return true
             return pageLayout.getLineBottom(pageLayout.lineCount - 1) <= heightLimit
+        }
+
+        private fun normalizeLineEndings(text: String): String {
+            return if (text.indexOf('\r') >= 0) {
+                text.replace("\r\n", "\n").replace('\r', '\n')
+            } else {
+                text
+            }
+        }
+
+        private fun trimmedEnd(text: CharSequence, start: Int, end: Int): Int {
+            var index = end.coerceIn(start, text.length)
+            while (index > start && text[index - 1].isWhitespace()) {
+                index -= 1
+            }
+            return index
         }
 
         private fun configureTextPaint(
@@ -752,20 +843,23 @@ class ReaderCanvasView @JvmOverloads constructor(
         }
 
         private fun createStaticLayout(
-            text: String,
+            text: CharSequence,
+            start: Int = 0,
+            end: Int = text.length,
             paint: TextPaint,
             width: Int,
             spacingMultiplier: Float,
         ): StaticLayout {
             return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                StaticLayout.Builder.obtain(text, 0, text.length, paint, width)
+                StaticLayout.Builder.obtain(text, start, end, paint, width)
                     .setAlignment(Layout.Alignment.ALIGN_NORMAL)
                     .setLineSpacing(0f, spacingMultiplier)
                     .setIncludePad(false)
                     .build()
             } else {
+                val range = text.subSequence(start, end)
                 @Suppress("DEPRECATION")
-                StaticLayout(text, paint, width, Layout.Alignment.ALIGN_NORMAL, spacingMultiplier, 0f, false)
+                StaticLayout(range, paint, width, Layout.Alignment.ALIGN_NORMAL, spacingMultiplier, 0f, false)
             }
         }
     }
