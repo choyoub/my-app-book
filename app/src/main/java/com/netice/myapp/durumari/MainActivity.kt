@@ -182,9 +182,7 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            window.setDecorFitsSystemWindows(false)
-        }
+        enableEdgeToEdgeContent()
         initializeSyntheticSounds()
         appTypeface = loadTypeface()
         settingsStore = LocalSettingsStore(this)
@@ -200,7 +198,7 @@ class MainActivity : Activity() {
 
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
-        if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN) {
             readerTypefaceCache.clear()
         }
     }
@@ -329,7 +327,7 @@ class MainActivity : Activity() {
     @Deprecated("Deprecated Android callback is sufficient for this Activity.")
     override fun onBackPressed() {
         if (!handleViewerBack()) {
-            super.onBackPressed()
+            finish()
         }
     }
 
@@ -3370,12 +3368,54 @@ class MainActivity : Activity() {
         darkStatusBarIcons: Boolean,
         darkNavigationBarIcons: Boolean,
     ) {
+        setSystemBarColorsCompat(statusBar, navigationBar)
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R || !setModernSystemBarAppearance(darkStatusBarIcons, darkNavigationBarIcons)) {
+            setLegacySystemUiVisibility(darkStatusBarIcons, darkNavigationBarIcons)
+        }
+    }
+
+    private fun setModernSystemBarAppearance(
+        darkStatusBarIcons: Boolean,
+        darkNavigationBarIcons: Boolean,
+    ): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false
+        return runCatching {
+            val controller = window.javaClass
+                .getMethod("getInsetsController")
+                .invoke(window)
+                ?: return false
+            val mask = SYSTEM_BAR_APPEARANCE_LIGHT_STATUS or SYSTEM_BAR_APPEARANCE_LIGHT_NAVIGATION
+            var appearance = 0
+            if (darkStatusBarIcons) appearance = appearance or SYSTEM_BAR_APPEARANCE_LIGHT_STATUS
+            if (darkNavigationBarIcons) appearance = appearance or SYSTEM_BAR_APPEARANCE_LIGHT_NAVIGATION
+            controller.javaClass
+                .getMethod("setSystemBarsAppearance", Int::class.javaPrimitiveType, Int::class.javaPrimitiveType)
+                .invoke(controller, appearance, mask)
+            true
+        }.getOrDefault(false)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun enableEdgeToEdgeContent() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.setDecorFitsSystemWindows(false)
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun setSystemBarColorsCompat(statusBar: Int, navigationBar: Int) {
         window.statusBarColor = statusBar
         window.navigationBarColor = navigationBar
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             window.navigationBarDividerColor = navigationBar
         }
+    }
 
+    @Suppress("DEPRECATION")
+    private fun setLegacySystemUiVisibility(
+        darkStatusBarIcons: Boolean,
+        darkNavigationBarIcons: Boolean,
+    ) {
         var flags = View.SYSTEM_UI_FLAG_LAYOUT_STABLE
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && darkStatusBarIcons) {
             flags = flags or View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
@@ -3835,6 +3875,8 @@ class MainActivity : Activity() {
         private const val VIEWER_STATUS_TEXT_LOADING = "본문을 불러오는 중..."
         private const val VIEWER_STATUS_REENCODING = "새로운 인코딩으로 문서를 불러오는 중..."
         private const val VIEWER_STATUS_PAGINATION = "전체 페이지를 계산하는 중..."
+        private const val SYSTEM_BAR_APPEARANCE_LIGHT_STATUS = 8
+        private const val SYSTEM_BAR_APPEARANCE_LIGHT_NAVIGATION = 16
         private val WHITESPACE_REGEX = Regex("\\s+")
     }
 }
