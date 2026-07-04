@@ -702,9 +702,12 @@ class ReaderCanvasView @JvmOverloads constructor(
             widthPx: Int,
             heightPx: Int,
             density: Float,
+            progressCallback: ((Float) -> Unit)? = null,
         ): List<PageSlice> {
+            progressCallback?.invoke(0f)
             val normalized = normalizeLineEndings(text)
             if (normalized.isBlank()) {
+                progressCallback?.invoke(1f)
                 return listOf(PageSlice("문서에 표시할 텍스트가 없습니다.", 0, 0))
             }
 
@@ -715,16 +718,19 @@ class ReaderCanvasView @JvmOverloads constructor(
             val paint = TextPaint(Paint.ANTI_ALIAS_FLAG)
             configureTextPaint(paint, settings, typeface, Color.BLACK, density)
 
+            progressCallback?.invoke(0.12f)
             val layout = createStaticLayout(
                 text = normalized,
                 paint = paint,
                 width = contentWidth,
                 spacingMultiplier = effectiveLineSpacingMultiplier(paint, settings),
             )
+            progressCallback?.invoke(0.28f)
             val pages = mutableListOf<PageSlice>()
             var startLine = 0
             val pageHeightLimit = (contentHeight - PAGE_BOTTOM_GUARD_DP * density).coerceAtLeast(1f)
             while (startLine < layout.lineCount) {
+                progressCallback?.invoke(0.28f + (startLine.toFloat() / layout.lineCount.coerceAtLeast(1)) * 0.70f)
                 val pageTop = layout.getLineTop(startLine)
                 var endLine = startLine
                 while (
@@ -759,6 +765,7 @@ class ReaderCanvasView @JvmOverloads constructor(
                 )
                 startLine = endLine
             }
+            progressCallback?.invoke(1f)
             return pages.ifEmpty {
                 listOf(PageSlice(normalized, 0, normalized.length, startLine = 0, endLine = layout.lineCount))
             }

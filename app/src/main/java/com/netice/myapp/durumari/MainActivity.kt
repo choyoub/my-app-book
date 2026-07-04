@@ -31,6 +31,7 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
 import android.view.animation.AccelerateDecelerateInterpolator
 import android.window.OnBackInvokedCallback
 import android.window.OnBackInvokedDispatcher
@@ -407,18 +408,38 @@ class MainActivity : Activity() {
         var introDone = false
         var restoreDone = resumeDocument == null
         var restoreResult: Result<ViewerLoadResult>? = null
+        var restoreStarted = false
+        var restoreProgress = 0
+        var introFrameSize: Pair<Int, Int>? = null
+
+        fun setRestoreProgress(value: Int) {
+            val next = value.coerceIn(0, 100)
+            if (next < restoreProgress) return
+            restoreProgress = next
+            progress.progress = next
+            introStatus.text = viewerStatusWithProgress(VIEWER_LOADING_TITLE, next)
+            progress.contentDescription = introStatus.text
+        }
 
         fun updateIntroProgress(elapsed: Long) {
+            if (resumeDocument != null && introDone && !restoreDone) {
+                setRestoreProgress(restoreProgress)
+                return
+            }
             val baseProgress = (12 + (elapsed / INTRO_ANIMATION_TOTAL_MS.toFloat() * 84f)).toInt().coerceIn(12, 96)
             progress.progress = when {
                 restoreResult?.isSuccess == true -> 100
-                resumeDocument != null && introDone && !restoreDone -> 97
                 else -> baseProgress
             }
             introStatus.text = when {
-                resumeDocument != null && (elapsed >= 1680L || restoreResult?.isSuccess == true) -> VIEWER_STATUS_PAGINATION
+                resumeDocument != null && restoreResult?.isSuccess == true -> viewerStatusWithProgress(VIEWER_LOADING_TITLE, 100)
                 else -> introStatusForElapsed(elapsed, hasResumeDocument = resumeDocument != null)
             }
+            progress.contentDescription = introStatus.text
+        }
+
+        fun updateIntroFrameSize() {
+            introFrameSize = contentFrameSizeForRoot(intro.width, intro.height)
         }
 
         fun completeIntroIfReady() {
@@ -438,6 +459,76 @@ class MainActivity : Activity() {
             }
         }
 
+        fun startRestoreIfReady() {
+            val document = resumeDocument ?: return
+            if (!introDone || restoreDone || restoreStarted) return
+            val frameSize = introFrameSize ?: return
+            restoreStarted = true
+            restoreProgress = 0
+            setRestoreProgress(0)
+            val (frameWidth, frameHeight) = frameSize
+            val requestId = ++paginationRequestId
+            val settingsSnapshot = settings
+            val typefaceSnapshot = loadReaderTypeface(settingsSnapshot)
+            var lastReportedProgress = -1
+            var lastReportedAt = 0L
+
+            fun reportProgress(value: Int, force: Boolean = false) {
+                val next = value.coerceIn(0, 99)
+                val now = System.currentTimeMillis()
+                if (!force && (next <= lastReportedProgress || now - lastReportedAt < 80L)) return
+                lastReportedProgress = next.coerceAtLeast(lastReportedProgress)
+                lastReportedAt = now
+                runOnUiThread {
+                    if (!activityDestroyed && restoreStarted && !restoreDone && paginationRequestId == requestId) {
+                        setRestoreProgress(next)
+                    }
+                }
+            }
+
+            Thread {
+                val finalResult = runCatching {
+                    loadViewerDocumentForDisplay(
+                        document = document,
+                        measuredWidthPx = frameWidth,
+                        measuredHeightPx = frameHeight,
+                        readerSettings = settingsSnapshot,
+                        typeface = typefaceSnapshot,
+                        progressCallback = { value -> reportProgress(value, force = value <= 2 || value >= 99) },
+                    )
+                }
+                runOnUiThread {
+                    if (activityDestroyed || paginationRequestId != requestId || settings != settingsSnapshot) {
+                        return@runOnUiThread
+                    }
+                    restoreResult = finalResult
+                    restoreDone = true
+                    if (finalResult.isSuccess) {
+                        setRestoreProgress(100)
+                        handler.postDelayed({ completeIntroIfReady() }, 80L)
+                    } else {
+                        completeIntroIfReady()
+                    }
+                }
+            }.apply {
+                name = "DurumariIntroRestore"
+                start()
+            }
+        }
+
+        intro.setOnApplyWindowInsetsListener { _, insets ->
+            safeTopInset = systemTopInset(insets)
+            safeBottomInset = systemBottomInset(insets)
+            intro.post {
+                updateIntroFrameSize()
+                startRestoreIfReady()
+            }
+            insets
+        }
+        intro.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            updateIntroFrameSize()
+            startRestoreIfReady()
+        }
         val animation = object : Runnable {
             override fun run() {
                 val elapsed = System.currentTimeMillis() - startAt
@@ -446,21 +537,15 @@ class MainActivity : Activity() {
             }
         }
         startScrollAnimation(artwork, repeat = false)
-        handler.post(animation)
-
-        if (resumeDocument != null) {
-            Thread {
-                val result = runCatching { loadViewerDocumentForDisplay(resumeDocument) }
-                runOnUiThread {
-                    restoreResult = result
-                    restoreDone = true
-                    updateIntroProgress(System.currentTimeMillis() - startAt)
-                    completeIntroIfReady()
-                }
-            }.start()
+        intro.post {
+            intro.requestApplyInsets()
+            updateIntroFrameSize()
+            startRestoreIfReady()
         }
+        handler.post(animation)
         handler.postDelayed({
             introDone = true
+            startRestoreIfReady()
             completeIntroIfReady()
         }, INTRO_ANIMATION_TOTAL_MS)
     }
@@ -481,6 +566,32 @@ class MainActivity : Activity() {
         syncBookmarksForActivePages()
         reloadLibraryState()
         showViewerPage(theme)
+    }
+
+    private fun contentFrameSizeForRoot(rootWidth: Int, rootHeight: Int): Pair<Int, Int>? {
+        if (rootWidth <= 0 || rootHeight <= 0) return null
+        val contentHeight = (rootHeight - safeTopInset - safeBottomInset).coerceAtLeast(1)
+        val maxContentWidth = (contentHeight * VIEWER_CONTENT_MAX_ASPECT).toInt().coerceAtLeast(1)
+        val contentWidth = rootWidth.coerceAtLeast(1).coerceAtMost(maxContentWidth)
+        return contentWidth to contentHeight
+    }
+
+    @Suppress("DEPRECATION")
+    private fun systemTopInset(insets: WindowInsets): Int {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            insets.getInsets(WindowInsets.Type.systemBars()).top
+        } else {
+            insets.systemWindowInsetTop
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun systemBottomInset(insets: WindowInsets): Int {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            insets.getInsets(WindowInsets.Type.systemBars()).bottom
+        } else {
+            insets.systemWindowInsetBottom
+        }
     }
 
     private fun showMainScreen() {
@@ -518,51 +629,54 @@ class MainActivity : Activity() {
         val tabHost = FrameLayout(this).apply {
             setBackgroundColor(theme.bg)
         }
-        val scroll = createMainScrollContent(theme, activeTab, attachSwipe = true)
+        val tabPage = createMainTabPage(theme, activeTab, attachSwipe = true)
         mainSwipeHost = tabHost
-        mainSwipeCurrentView = scroll
-        tabHost.addView(scroll, FrameLayout.LayoutParams(match, match))
+        mainSwipeCurrentView = tabPage
+        tabHost.addView(tabPage, FrameLayout.LayoutParams(match, match))
         page.addView(fixedHeader, linear(match, wrap))
         page.addView(tabHost, LinearLayout.LayoutParams(match, 0, 1f))
         return page
     }
 
-    private fun createMainScrollContent(
+    private fun createMainTabPage(
         theme: ThemeTokens,
         tab: MainTab,
         attachSwipe: Boolean,
-    ): ScrollView {
+    ): View {
         val previousTab = activeTab
         activeTab = tab
-        val scroll = ScrollView(this).apply {
-            setBackgroundColor(theme.bg)
-            isFillViewport = true
-            overScrollMode = ScrollView.OVER_SCROLL_IF_CONTENT_SCROLLS
-        }
-        val content = LinearLayout(this).apply {
+        val page = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
+            setBackgroundColor(theme.bg)
             setPadding(dp(16), dp(8), dp(16), dp(18))
         }
 
         if (activeTab == MainTab.LIBRARY) {
-            content.addView(createFolderRow(theme), linear(match, wrap))
+            page.addView(createFolderRow(theme), linear(match, wrap))
         }
         val tabContentHolder = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
         }
-        content.addView(
+        page.addView(
             createSearchAndSort(theme) {
                 replaceTabContent(tabContentHolder, theme)
             },
             linear(match, wrap, top = 8),
         )
         replaceTabContent(tabContentHolder, theme)
-        content.addView(tabContentHolder, linear(match, wrap, top = 10))
 
-        scroll.addView(content, FrameLayout.LayoutParams(match, wrap))
-        if (attachSwipe) attachMainSwipeNavigation(scroll)
+        val listScroll = ScrollView(this).apply {
+            setBackgroundColor(theme.bg)
+            isFillViewport = true
+            overScrollMode = ScrollView.OVER_SCROLL_IF_CONTENT_SCROLLS
+        }
+        listScroll.addView(tabContentHolder, FrameLayout.LayoutParams(match, wrap))
+        page.addView(listScroll, LinearLayout.LayoutParams(match, 0, 1f).apply {
+            topMargin = dp(10)
+        })
+        if (attachSwipe) attachMainSwipeNavigation(listScroll)
         activeTab = previousTab
-        return scroll
+        return page
     }
 
     private fun replaceTabContent(container: LinearLayout, theme: ThemeTokens) {
@@ -628,7 +742,7 @@ class MainActivity : Activity() {
         val theme = DurumariThemes.tokens(settings.theme)
         val direction = if (delta > 0) 1 else -1
         val width = host.width.toFloat().coerceAtLeast(1f)
-        val nextView = createMainScrollContent(theme, nextTab, attachSwipe = false).apply {
+        val nextView = createMainTabPage(theme, nextTab, attachSwipe = false).apply {
             translationX = direction * width
         }
         host.addView(nextView, FrameLayout.LayoutParams(match, match))
@@ -1547,37 +1661,52 @@ class MainActivity : Activity() {
         page.addView(column, FrameLayout.LayoutParams(match, wrap, Gravity.CENTER))
 
         rootLayer?.setScreenContent(page)
-        val loadingStartedAt = System.currentTimeMillis()
-        val loadingAnimation = object : Runnable {
-            override fun run() {
-                val elapsed = System.currentTimeMillis() - loadingStartedAt
-                progress.progress = (elapsed / 2200f * 96f).toInt().coerceIn(0, 96)
-                val baseStatus = if (elapsed < 450L) initialLoadingStatus else VIEWER_STATUS_PAGINATION
-                loadingStatus.text = viewerStatusWithProgress(baseStatus, progress.progress)
-                handler.postDelayed(this, 85)
+        val requestId = ++paginationRequestId
+        var lastReportedProgress = -1
+        var lastReportedAt = 0L
+
+        fun reportLoadingProgress(value: Int, force: Boolean = false) {
+            val next = value.coerceIn(0, 99)
+            val now = System.currentTimeMillis()
+            if (!force && (next <= lastReportedProgress || now - lastReportedAt < 80L)) return
+            lastReportedProgress = next.coerceAtLeast(lastReportedProgress)
+            lastReportedAt = now
+            runOnUiThread {
+                if (activityDestroyed || paginationRequestId != requestId) return@runOnUiThread
+                val status = if (next < 32) initialLoadingStatus else VIEWER_STATUS_PAGINATION
+                progress.progress = next
+                loadingStatus.text = viewerStatusWithProgress(status, next)
+                progress.contentDescription = loadingStatus.text
             }
         }
         startScrollAnimation(artwork, repeat = false)
-        handler.post(loadingAnimation)
+        reportLoadingProgress(0, force = true)
 
         activeDocument = document
         markViewerResume(document.documentId)
         Thread {
             runCatching {
-                loadViewerDocumentForDisplay(document, targetPage, targetOffset, forceEncoding)
+                loadViewerDocumentForDisplay(
+                    document = document,
+                    targetPage = targetPage,
+                    targetOffset = targetOffset,
+                    forceEncoding = forceEncoding,
+                    progressCallback = { value -> reportLoadingProgress(value, force = value <= 2 || value >= 99) },
+                )
             }.onSuccess { loaded ->
                 runOnUiThread {
-                    handler.removeCallbacks(loadingAnimation)
+                    if (paginationRequestId != requestId) return@runOnUiThread
                     applyViewerLoadResult(loaded)
                     progress.progress = 100
                     loadingStatus.text = viewerStatusWithProgress(VIEWER_STATUS_PAGINATION, 100)
+                    progress.contentDescription = loadingStatus.text
                     syncBookmarksForActivePages()
                     reloadLibraryState()
                     showViewerPage(theme)
                 }
             }.onFailure { error ->
                 runOnUiThread {
-                    handler.removeCallbacks(loadingAnimation)
+                    if (paginationRequestId != requestId) return@runOnUiThread
                     clearViewerResume()
                     activeDocument = null
                     activePages = emptyList()
@@ -1595,11 +1724,28 @@ class MainActivity : Activity() {
         targetPage: Int? = null,
         targetOffset: Int? = null,
         forceEncoding: String? = null,
+        measuredWidthPx: Int? = null,
+        measuredHeightPx: Int? = null,
+        readerSettings: ReaderSettings = settings,
+        typeface: Typeface = loadReaderTypeface(readerSettings),
+        progressCallback: ((Int) -> Unit)? = null,
     ): ViewerLoadResult {
+        progressCallback?.invoke(2)
         val decoded = loadDocumentForViewer(document, forceEncoding)
         val displayText = normalizeViewerText(decoded.text)
-        val pagination = paginateText(displayText)
-        val savedReading = readingsById[document.documentId]
+        progressCallback?.invoke(32)
+        val pagination = paginateText(
+            text = displayText,
+            measuredWidthPx = measuredWidthPx,
+            measuredHeightPx = measuredHeightPx,
+            readerSettings = readerSettings,
+            typeface = typeface,
+            progressCallback = { ratio ->
+                progressCallback?.invoke((32 + ratio * 66f).roundToInt().coerceIn(32, 98))
+            },
+        )
+        progressCallback?.invoke(99)
+        val savedReading = readingsById[decoded.document.documentId]
         val anchorOffset = when {
             targetOffset != null -> targetOffset.coerceIn(0, displayText.length)
             targetPage != null -> pagination.pages
@@ -2093,6 +2239,9 @@ class MainActivity : Activity() {
         text: String,
         measuredWidthPx: Int? = null,
         measuredHeightPx: Int? = null,
+        readerSettings: ReaderSettings = settings,
+        typeface: Typeface = loadReaderTypeface(readerSettings),
+        progressCallback: ((Float) -> Unit)? = null,
     ): PaginationResult {
         val metrics = resources.displayMetrics
         val root = rootLayer
@@ -2104,11 +2253,12 @@ class MainActivity : Activity() {
             ?: (metrics.heightPixels - safeTopInset - safeBottomInset).coerceAtLeast(1)
         return paginateTextForFrame(
             text = text,
-            readerSettings = settings,
-            typeface = loadReaderTypeface(settings),
+            readerSettings = readerSettings,
+            typeface = typeface,
             widthPx = contentWidth,
             heightPx = contentHeight,
             density = metrics.density,
+            progressCallback = progressCallback,
         )
     }
 
@@ -2119,6 +2269,7 @@ class MainActivity : Activity() {
         widthPx: Int,
         heightPx: Int,
         density: Float,
+        progressCallback: ((Float) -> Unit)? = null,
     ): PaginationResult {
         return PaginationResult(
             pages = ReaderCanvasView.paginate(
@@ -2128,6 +2279,7 @@ class MainActivity : Activity() {
                 widthPx = widthPx,
                 heightPx = heightPx,
                 density = density,
+                progressCallback = progressCallback,
             ),
             widthPx = widthPx,
             heightPx = heightPx,
@@ -3863,6 +4015,7 @@ class MainActivity : Activity() {
         private const val SCROLL_ANIMATION_START_DELAY_MS = 180L
         private const val SCROLL_ANIMATION_ACTIVE_MS = 1600L
         private const val INTRO_ANIMATION_TOTAL_MS = SCROLL_ANIMATION_START_DELAY_MS + SCROLL_ANIMATION_ACTIVE_MS
+        private const val VIEWER_CONTENT_MAX_ASPECT = 2f / 3f
         private const val SWIPE_CANCEL_PX = 8f
         private const val SWIPE_CONFIRM_PX = 52f
         private const val SWIPE_CONFIRM_RATIO = 0.20f
