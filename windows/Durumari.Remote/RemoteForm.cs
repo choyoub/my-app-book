@@ -13,14 +13,12 @@ internal enum WidgetThemeMode
 internal sealed class RemoteForm : Form
 {
     private static readonly Color TransparentKeyColor = Color.FromArgb(1, 2, 3);
-    private readonly RemoteClient _client;
     private readonly SlimKeycap[] _keycaps;
     private bool _systemEventsSubscribed;
     private WidgetThemeMode _themeMode = WidgetThemeMode.System;
 
-    public RemoteForm(RemoteClient client)
+    public RemoteForm(Func<Task> previousPage, Func<Task> nextPage)
     {
-        _client = client;
         Text = "두루마리 리모콘";
         ClientSize = new Size(168, 62);
         FormBorderStyle = FormBorderStyle.None;
@@ -34,8 +32,8 @@ internal sealed class RemoteForm : Form
 
         var previous = CreateKeycap(pointsRight: false, new Point(0, 0), "이전 페이지");
         var next = CreateKeycap(pointsRight: true, new Point(88, 0), "다음 페이지");
-        previous.Click += async (_, _) => await _client.PreviousPageAsync();
-        next.Click += async (_, _) => await _client.NextPageAsync();
+        previous.Click += async (_, _) => await previousPage();
+        next.Click += async (_, _) => await nextPage();
         _keycaps = [previous, next];
         Controls.AddRange(_keycaps);
 
@@ -56,13 +54,13 @@ internal sealed class RemoteForm : Form
             {
                 eventArgs.SuppressKeyPress = true;
                 previous.PlayTapAnimation();
-                await _client.PreviousPageAsync();
+                await previousPage();
             }
             else if (eventArgs.KeyCode == Keys.Right)
             {
                 eventArgs.SuppressKeyPress = true;
                 next.PlayTapAnimation();
-                await _client.NextPageAsync();
+                await nextPage();
             }
         };
     }

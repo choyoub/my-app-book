@@ -5,8 +5,10 @@ namespace Durumari.Remote;
 internal sealed class MainForm : Form
 {
     private const string RegistryPath = @"Software\Durumari\Remote";
+    private static readonly int[] ReconnectDelaysMs = [1_000, 2_000, 4_000, 8_000, 10_000];
 
     private readonly RemoteClient _client = new();
+    private readonly System.Windows.Forms.Timer _reconnectTimer = new();
     private readonly Icon _appIcon;
     private readonly TextBox _hostInput = new();
     private readonly CheckBox _defaultPortCheck = new();
@@ -24,6 +26,11 @@ internal sealed class MainForm : Form
     private bool _exiting;
     private bool _loadingSettings;
     private bool _hasWidgetPosition;
+    private bool _connectionRequested;
+    private bool _connectionAttemptInProgress;
+    private bool _automaticReconnectPaused;
+    private bool _widgetActivated;
+    private int _reconnectAttempt;
     private Point _widgetPosition;
 
     public MainForm()
@@ -55,7 +62,9 @@ internal sealed class MainForm : Form
         _connectionMenuItem.Click += async (_, _) => await ToggleConnectionAsync();
         exitItem.Click += async (_, _) => await ExitApplicationAsync();
 
-        _remoteForm = new RemoteForm(_client);
+        _remoteForm = new RemoteForm(
+            () => SendWidgetCommandAsync(_client.PreviousPageAsync),
+            () => SendWidgetCommandAsync(_client.NextPageAsync));
         _remoteForm.VisibleChanged += (_, _) =>
         {
             UpdateRemoteMenuText();
@@ -70,6 +79,11 @@ internal sealed class MainForm : Form
 
         BuildLayout();
         LoadSettings();
+        _reconnectTimer.Tick += async (_, _) =>
+        {
+            _reconnectTimer.Stop();
+            await TryConnectAsync();
+        };
         _client.StateChanged += (_, _) => UpdateConnectionStateSafe();
         UpdateConnectionStateSafe();
 
@@ -82,6 +96,7 @@ internal sealed class MainForm : Form
         {
             _trayIcon.Visible = false;
             _trayIcon.Dispose();
+            _reconnectTimer.Dispose();
             _remoteForm.Dispose();
             _client.DisposeAsync().AsTask().GetAwaiter().GetResult();
             _appIcon.Dispose();
@@ -239,20 +254,91 @@ internal sealed class MainForm : Form
 
     private async Task ToggleConnectionAsync()
     {
-        if (_client.State is ConnectionState.Connected or ConnectionState.Connecting)
+        if (_connectionRequested || _client.State is ConnectionState.Connected or ConnectionState.Connecting)
         {
+            StopAutomaticReconnect();
+            _widgetActivated = false;
+            if (_remoteForm.Visible) _remoteForm.Hide();
             await _client.DisconnectAsync();
             return;
         }
 
         SaveSettings();
-        var port = _defaultPortCheck.Checked ? RemoteClient.DefaultPort : Decimal.ToInt32(_portInput.Value);
-        await _client.ConnectAsync(_hostInput.Text, port);
+        _connectionRequested = true;
+        _automaticReconnectPaused = false;
+        _reconnectAttempt = 0;
+        await TryConnectAsync();
+    }
+
+    private async Task SendWidgetCommandAsync(Func<Task> sendCommand)
+    {
+        if (_client.State != ConnectionState.Connected)
+        {
+            if (!_widgetActivated || _connectionAttemptInProgress) return;
+            _connectionRequested = true;
+            _automaticReconnectPaused = false;
+            _reconnectAttempt = 0;
+            await TryConnectAsync();
+        }
+
+        if (_client.State == ConnectionState.Connected) await sendCommand();
+    }
+
+    private async Task TryConnectAsync()
+    {
+        if (!_connectionRequested || _connectionAttemptInProgress || _exiting) return;
+
+        _reconnectTimer.Stop();
+        _connectionAttemptInProgress = true;
+        try
+        {
+            var port = _defaultPortCheck.Checked ? RemoteClient.DefaultPort : Decimal.ToInt32(_portInput.Value);
+            await _client.ConnectAsync(_hostInput.Text, port);
+        }
+        finally
+        {
+            _connectionAttemptInProgress = false;
+            if (_connectionRequested && !_exiting && _client.State != ConnectionState.Connected)
+            {
+                ScheduleReconnect();
+            }
+            UpdateConnectionStateSafe();
+        }
+    }
+
+    private void ScheduleReconnect()
+    {
+        if (!_connectionRequested ||
+            _connectionAttemptInProgress ||
+            _automaticReconnectPaused ||
+            _exiting ||
+            _reconnectTimer.Enabled)
+        {
+            return;
+        }
+
+        if (_reconnectAttempt >= ReconnectDelaysMs.Length)
+        {
+            _automaticReconnectPaused = true;
+            return;
+        }
+
+        _reconnectTimer.Interval = ReconnectDelaysMs[_reconnectAttempt];
+        _reconnectAttempt++;
+        _reconnectTimer.Start();
+    }
+
+    private void StopAutomaticReconnect()
+    {
+        _connectionRequested = false;
+        _reconnectTimer.Stop();
+        _automaticReconnectPaused = false;
+        _reconnectAttempt = 0;
     }
 
     private void ToggleRemoteWindow()
     {
-        if (_client.State != ConnectionState.Connected) return;
+        if (!_widgetActivated) return;
         if (_remoteForm.Visible)
         {
             _remoteForm.Hide();
@@ -271,10 +357,11 @@ internal sealed class MainForm : Form
         _remoteForm.Activate();
     }
 
-    private void OpenMainWindow()
+    internal void OpenMainWindow()
     {
         Show();
         WindowState = FormWindowState.Normal;
+        BringToFront();
         Activate();
     }
 
@@ -287,21 +374,46 @@ internal sealed class MainForm : Form
             return;
         }
 
-        var (color, text) = StatePresentation.For(_client.State);
+        if (_client.State == ConnectionState.Connected)
+        {
+            _reconnectTimer.Stop();
+            _automaticReconnectPaused = false;
+            _reconnectAttempt = 0;
+            _widgetActivated = true;
+        }
+        else if (_connectionRequested &&
+            !_connectionAttemptInProgress &&
+            !_automaticReconnectPaused &&
+            _client.State is ConnectionState.Disconnected or ConnectionState.Error)
+        {
+            ScheduleReconnect();
+        }
+
+        var disconnectedWhileRequested = _connectionRequested &&
+            !_connectionAttemptInProgress &&
+            _client.State is ConnectionState.Disconnected or ConnectionState.Error;
+        var reconnectWaiting = disconnectedWhileRequested && !_automaticReconnectPaused;
+        var reconnectPaused = disconnectedWhileRequested && _automaticReconnectPaused;
+        var presentationState = reconnectWaiting ? ConnectionState.Connecting :
+            reconnectPaused ? ConnectionState.Disconnected : _client.State;
+        var (color, defaultText) = StatePresentation.For(presentationState);
+        var text = reconnectWaiting ? "재연결 대기 중" :
+            reconnectPaused ? "연결 끊김 · 위젯 버튼으로 재연결" : defaultText;
         _statusDot.DotColor = color;
         _statusLabel.Text = _client.StateDetail is { Length: > 0 }
             ? $"{text} · {_client.StateDetail}"
             : text;
         var connected = _client.State == ConnectionState.Connected;
-        _connectButton.Text = connected || _client.State == ConnectionState.Connecting ? "연결 끊기" : "연결";
-        _connectionMenuItem.Text = connected || _client.State == ConnectionState.Connecting ? "끊기" : "연결";
+        var connectionActive = _connectionRequested || connected || _client.State == ConnectionState.Connecting;
+        _connectButton.Text = connectionActive ? "연결 끊기" : "연결";
+        _connectionMenuItem.Text = connectionActive ? "끊기" : "연결";
         _trayIcon.Text = $"두루마리 리모콘 · {text}";
-        _remoteMenuItem.Enabled = connected;
+        _remoteMenuItem.Enabled = _widgetActivated;
         if (connected)
         {
             if (!_remoteForm.Visible) ShowRemoteWindow();
         }
-        else if (_remoteForm.Visible)
+        else if (!_widgetActivated && _remoteForm.Visible)
         {
             _remoteForm.Hide();
         }
@@ -317,7 +429,7 @@ internal sealed class MainForm : Form
     {
         SaveSettings();
         if (_exiting) return;
-        if (_client.State is ConnectionState.Connected or ConnectionState.Connecting)
+        if (_connectionRequested || _client.State is ConnectionState.Connected or ConnectionState.Connecting)
         {
             eventArgs.Cancel = true;
             Hide();
@@ -327,6 +439,7 @@ internal sealed class MainForm : Form
     private async Task ExitApplicationAsync()
     {
         _exiting = true;
+        StopAutomaticReconnect();
         await _client.DisconnectAsync();
         Close();
     }

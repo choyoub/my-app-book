@@ -33,7 +33,6 @@ class RemoteControlServer(
         stop()
         val runId = generation.incrementAndGet()
         running.set(true)
-        updateState(RemoteConnectionState.LISTENING, null)
         thread(name = "durumari-remote-server", isDaemon = true) {
             var ownedServer: ServerSocket? = null
             try {
@@ -43,6 +42,8 @@ class RemoteControlServer(
                 }
                 ownedServer = server
                 synchronized(lock) { serverSocket = server }
+                if (!running.get() || generation.get() != runId) return@thread
+                updateState(RemoteConnectionState.LISTENING, null)
                 while (running.get() && generation.get() == runId) {
                     val client = server.accept()
                     synchronized(lock) {

@@ -136,6 +136,7 @@ class MainActivity : Activity() {
     private lateinit var appTypeface: Typeface
     @Volatile
     private var activityDestroyed: Boolean = false
+    private var activityStarted: Boolean = false
     private val readerTypefaceCache = object : LinkedHashMap<String, Typeface>(MAX_READER_TYPEFACE_CACHE, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Typeface>?): Boolean {
             return size > MAX_READER_TYPEFACE_CACHE
@@ -217,6 +218,18 @@ class MainActivity : Activity() {
         showIntroThenMain()
     }
 
+    override fun onStart() {
+        super.onStart()
+        activityStarted = true
+        if (::remoteControlServer.isInitialized) applyRemoteControlSettings()
+    }
+
+    override fun onStop() {
+        activityStarted = false
+        if (::remoteControlServer.isInitialized) remoteControlServer.stop()
+        super.onStop()
+    }
+
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
         if (level >= ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN) {
@@ -250,6 +263,7 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         activityDestroyed = true
+        activityStarted = false
         if (::remoteControlServer.isInitialized) remoteControlServer.stop()
         handler.removeCallbacksAndMessages(null)
         stopScrollAnimation()
@@ -3278,7 +3292,7 @@ class MainActivity : Activity() {
         val previousPort = previous?.let {
             if (it.remoteUseDefaultPort) RemoteControlServer.DEFAULT_PORT else it.remoteControlPort.coerceIn(1, 65535)
         }
-        if (!settings.remoteControlEnabled) {
+        if (!settings.remoteControlEnabled || !activityStarted) {
             remoteControlServer.stop()
         } else if (
             previous?.remoteControlEnabled == true &&
