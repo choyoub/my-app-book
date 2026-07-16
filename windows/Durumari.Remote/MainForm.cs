@@ -30,6 +30,7 @@ internal sealed class MainForm : Form
     private bool _connectionAttemptInProgress;
     private bool _automaticReconnectPaused;
     private bool _widgetActivated;
+    private bool _widgetHiddenByUser;
     private int _reconnectAttempt;
     private Point _widgetPosition;
 
@@ -258,6 +259,7 @@ internal sealed class MainForm : Form
         {
             StopAutomaticReconnect();
             _widgetActivated = false;
+            _widgetHiddenByUser = false;
             if (_remoteForm.Visible) _remoteForm.Hide();
             await _client.DisconnectAsync();
             return;
@@ -341,10 +343,12 @@ internal sealed class MainForm : Form
         if (!_widgetActivated) return;
         if (_remoteForm.Visible)
         {
+            _widgetHiddenByUser = true;
             _remoteForm.Hide();
         }
         else
         {
+            _widgetHiddenByUser = false;
             ShowRemoteWindow();
         }
         UpdateRemoteMenuText();
@@ -411,7 +415,7 @@ internal sealed class MainForm : Form
         _remoteMenuItem.Enabled = _widgetActivated;
         if (connected)
         {
-            if (!_remoteForm.Visible) ShowRemoteWindow();
+            if (!_remoteForm.Visible && !_widgetHiddenByUser) ShowRemoteWindow();
         }
         else if (!_widgetActivated && _remoteForm.Visible)
         {
