@@ -32,6 +32,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
+import android.view.WindowManager
 import android.view.animation.AccelerateDecelerateInterpolator
 import android.window.OnBackInvokedCallback
 import android.window.OnBackInvokedDispatcher
@@ -65,6 +66,9 @@ import com.netice.myapp.durumari.model.SortConfig
 import com.netice.myapp.durumari.model.SortDirection
 import com.netice.myapp.durumari.model.readingStatus
 import com.netice.myapp.durumari.model.ThemeName
+import com.netice.myapp.durumari.remote.RemoteCommand
+import com.netice.myapp.durumari.remote.RemoteConnectionState
+import com.netice.myapp.durumari.remote.RemoteControlServer
 import com.netice.myapp.durumari.ui.DurumariThemes
 import com.netice.myapp.durumari.ui.DurumariRootLayer
 import com.netice.myapp.durumari.ui.ReaderCanvasView
@@ -120,6 +124,11 @@ class MainActivity : Activity() {
     private lateinit var appStore: DurumariStore
     private lateinit var documentScanner: DocumentScanner
     private lateinit var documentTextLoader: DocumentTextLoader
+    private lateinit var remoteControlServer: RemoteControlServer
+    private var remoteConnectionState: RemoteConnectionState = RemoteConnectionState.OFF
+    private var remoteConnectionDetail: String? = null
+    private var remoteStatusDot: View? = null
+    private var remoteStatusText: TextView? = null
     private var activeTab: MainTab = MainTab.LIBRARY
     private var rootLayer: DurumariRootLayer? = null
     private var safeTopInset: Int = 0
@@ -188,6 +197,17 @@ class MainActivity : Activity() {
         appTypeface = loadTypeface()
         settingsStore = LocalSettingsStore(this)
         settings = normalizeReaderSettings(settingsStore.load())
+        remoteControlServer = RemoteControlServer(
+            onCommand = ::handleRemoteCommand,
+            onStateChanged = { state, detail ->
+                handler.post {
+                    remoteConnectionState = state
+                    remoteConnectionDetail = detail
+                    updateRemoteStatusUi()
+                }
+            },
+        )
+        applyRemoteControlSettings()
         appStore = DurumariStore(this)
         appStore.initStore()
         documentScanner = DocumentScanner(contentResolver)
@@ -230,6 +250,7 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         activityDestroyed = true
+        if (::remoteControlServer.isInitialized) remoteControlServer.stop()
         handler.removeCallbacksAndMessages(null)
         stopScrollAnimation()
         unregisterBackInvokedCallback()
@@ -597,6 +618,7 @@ class MainActivity : Activity() {
     private fun showMainScreen() {
         handler.removeCallbacksAndMessages(null)
         stopScrollAnimation()
+        updateKeepScreenOn(viewerActive = false)
         activeReaderCanvas = null
         pendingViewerAnchorOffset = null
         val theme = DurumariThemes.tokens(settings.theme)
@@ -1683,6 +1705,7 @@ class MainActivity : Activity() {
         reportLoadingProgress(0, force = true)
 
         activeDocument = document
+        updateKeepScreenOn(viewerActive = true)
         markViewerResume(document.documentId)
         Thread {
             runCatching {
@@ -1782,6 +1805,7 @@ class MainActivity : Activity() {
     private fun showViewerPage(theme: ThemeTokens) {
         handler.removeCallbacksAndMessages(null)
         stopScrollAnimation()
+        updateKeepScreenOn(viewerActive = true)
         if (pendingViewerAnchorOffset == null) {
             saveActiveReading()
         }
@@ -2747,6 +2771,8 @@ class MainActivity : Activity() {
                 }
                 settings = normalizeReaderSettings(draftSettings)
                 settingsStore.save(settings)
+                applyRemoteControlSettings(previous)
+                updateKeepScreenOn(viewerActive = viewerWasOpen)
                 pruneReaderTypefaceCache(settings)
                 rootLayer?.dismissOverlay()
                 if (viewerWasOpen) {
@@ -2862,6 +2888,9 @@ class MainActivity : Activity() {
                     draftSettings = normalizeReaderSettings(updated)
                     rebuild.invoke()
                 },
+                onSettingsUpdatedSilently = { updated ->
+                    draftSettings = normalizeReaderSettings(updated)
+                },
             )
         }
 
@@ -2881,6 +2910,7 @@ class MainActivity : Activity() {
         draftSettings: ReaderSettings,
         onFontPickerOpen: (View) -> Unit,
         onSettingsChanged: (ReaderSettings) -> Unit,
+        onSettingsUpdatedSilently: (ReaderSettings) -> Unit,
     ) {
         val previewTheme = DurumariThemes.tokens(draftSettings.theme)
         panel.setBackgroundColor(appliedTheme.outer)
@@ -2902,6 +2932,15 @@ class MainActivity : Activity() {
         )
         body.addView(createMarginSettingsSection(appliedTheme, draftSettings, onSettingsChanged), linear(match, wrap, top = SETTINGS_SECTION_GAP_DP))
         body.addView(createPageMovementSection(appliedTheme, draftSettings, onSettingsChanged), linear(match, wrap, top = SETTINGS_SECTION_GAP_DP))
+        body.addView(
+            createRemoteControlSection(
+                theme = appliedTheme,
+                draftSettings = draftSettings,
+                onSettingsChanged = onSettingsChanged,
+                onPortChanged = { port -> onSettingsUpdatedSilently(draftSettings.copy(remoteControlPort = port)) },
+            ),
+            linear(match, wrap, top = SETTINGS_SECTION_GAP_DP),
+        )
         body.addView(
             createThemeFilterSection(
                 theme = appliedTheme,
@@ -3159,7 +3198,137 @@ class MainActivity : Activity() {
             }
             onSettingsChanged(draftSettings.copy(pageTurnStyle = selected))
         }, linear(match, wrap))
+        section.addView(createToggleRow(theme, "💡 뷰 모드 화면 켜짐 유지", draftSettings.keepScreenOnInViewer) {
+            onSettingsChanged(draftSettings.copy(keepScreenOnInViewer = !draftSettings.keepScreenOnInViewer))
+        }, linear(match, wrap, top = SETTINGS_CONTROL_GAP_DP))
         return section
+    }
+
+    private fun createRemoteControlSection(
+        theme: ThemeTokens,
+        draftSettings: ReaderSettings,
+        onSettingsChanged: (ReaderSettings) -> Unit,
+        onPortChanged: (Int) -> Unit,
+    ): View {
+        val section = createSettingsSection(theme, "🖥️ Windows 리모콘")
+        section.addView(createToggleRow(theme, "리모콘 사용", draftSettings.remoteControlEnabled) {
+            onSettingsChanged(draftSettings.copy(remoteControlEnabled = !draftSettings.remoteControlEnabled))
+        }, linear(match, wrap))
+
+        val statusRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(4), dp(SETTINGS_ROW_VERTICAL_PADDING_DP), dp(4), dp(SETTINGS_ROW_VERTICAL_PADDING_DP))
+        }
+        val statusDot = View(this).apply {
+            contentDescription = "리모콘 연결 상태"
+        }
+        val statusText = text("", theme.secondary, 14f)
+        remoteStatusDot = statusDot
+        remoteStatusText = statusText
+        statusRow.addView(statusDot, linear(dp(14), dp(14), right = 10))
+        statusRow.addView(statusText, LinearLayout.LayoutParams(0, wrap, 1f))
+        section.addView(statusRow, linear(match, wrap))
+        updateRemoteStatusUi()
+
+        section.addView(createToggleRow(theme, "기본 포트 사용 (${RemoteControlServer.DEFAULT_PORT})", draftSettings.remoteUseDefaultPort) {
+            onSettingsChanged(draftSettings.copy(remoteUseDefaultPort = !draftSettings.remoteUseDefaultPort))
+        }, linear(match, wrap))
+
+        if (!draftSettings.remoteUseDefaultPort) {
+            val portRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(4), dp(SETTINGS_ROW_VERTICAL_PADDING_DP), dp(4), dp(SETTINGS_ROW_VERTICAL_PADDING_DP))
+            }
+            portRow.addView(text("수동 포트", theme.text, 14f), LinearLayout.LayoutParams(0, wrap, 1f))
+            val portInput = EditText(this).apply {
+                setText(draftSettings.remoteControlPort.toString())
+                setSelectAllOnFocus(true)
+                setSingleLine(true)
+                inputType = InputType.TYPE_CLASS_NUMBER
+                setTextColor(theme.text)
+                setHintTextColor(theme.secondary)
+                setTextSize(TypedValue.COMPLEX_UNIT_DIP, 14f)
+                gravity = Gravity.CENTER
+                background = roundedRect(theme.bg, 10, strokeColor = theme.border)
+                setPadding(dp(10), 0, dp(10), 0)
+                addTextChangedListener(object : TextWatcher {
+                    override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                        s?.toString()?.toIntOrNull()?.takeIf { it in 1..65535 }?.let(onPortChanged)
+                    }
+                    override fun afterTextChanged(s: Editable?) = Unit
+                })
+            }
+            portRow.addView(portInput, linear(dp(116), dp(42)))
+            section.addView(portRow, linear(match, wrap))
+        }
+        section.addView(
+            text("Tailscale에 연결된 Windows PC에서 Android 기기의 도메인과 이 포트로 연결하세요.", theme.secondary, 12f).apply {
+                setLineSpacing(0f, 1.25f)
+            },
+            linear(match, wrap, top = SETTINGS_CONTROL_GAP_DP, bottom = SETTINGS_ROW_VERTICAL_PADDING_DP),
+        )
+        return section
+    }
+
+    private fun applyRemoteControlSettings(previous: ReaderSettings? = null) {
+        val port = if (settings.remoteUseDefaultPort) RemoteControlServer.DEFAULT_PORT else settings.remoteControlPort.coerceIn(1, 65535)
+        val previousPort = previous?.let {
+            if (it.remoteUseDefaultPort) RemoteControlServer.DEFAULT_PORT else it.remoteControlPort.coerceIn(1, 65535)
+        }
+        if (!settings.remoteControlEnabled) {
+            remoteControlServer.stop()
+        } else if (
+            previous?.remoteControlEnabled == true &&
+            previousPort == port &&
+            remoteConnectionState != RemoteConnectionState.ERROR
+        ) {
+            updateRemoteStatusUi()
+        } else {
+            remoteControlServer.start(port)
+        }
+    }
+
+    private fun handleRemoteCommand(command: RemoteCommand) {
+        handler.post {
+            if (activityDestroyed || activeDocument == null || activePages.isEmpty()) return@post
+            val delta = if (command == RemoteCommand.NEXT_PAGE) 1 else -1
+            turnViewerPage(
+                delta,
+                DurumariThemes.tokens(settings.theme),
+                activeReaderCanvas,
+                ReaderCanvasView.TurnAxis.HORIZONTAL,
+            )
+        }
+    }
+
+    private fun updateRemoteStatusUi() {
+        val color = when (remoteConnectionState) {
+            RemoteConnectionState.OFF -> Color.rgb(148, 148, 148)
+            RemoteConnectionState.LISTENING -> Color.rgb(230, 150, 45)
+            RemoteConnectionState.CONNECTED -> Color.rgb(42, 166, 92)
+            RemoteConnectionState.ERROR -> Color.rgb(210, 66, 66)
+        }
+        remoteStatusDot?.background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(color)
+        }
+        remoteStatusText?.text = when (remoteConnectionState) {
+            RemoteConnectionState.OFF -> "꺼짐"
+            RemoteConnectionState.LISTENING -> "연결 대기 중"
+            RemoteConnectionState.CONNECTED -> remoteConnectionDetail?.let { "연결됨 · $it" } ?: "연결됨"
+            RemoteConnectionState.ERROR -> remoteConnectionDetail?.let { "오류 · $it" } ?: "오류"
+        }
+    }
+
+    private fun updateKeepScreenOn(viewerActive: Boolean) {
+        if (viewerActive && settings.keepScreenOnInViewer) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
     }
 
     private fun createThemeFilterSection(

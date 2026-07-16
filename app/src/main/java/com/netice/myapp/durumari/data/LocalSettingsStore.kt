@@ -29,6 +29,10 @@ class LocalSettingsStore(context: Context) {
             volumeKeyPaging = prefs.getBoolean(KEY_VOLUME_KEY_PAGING, defaults.volumeKeyPaging),
             pageTurnFeedback = prefs.enumValue(KEY_PAGE_TURN_FEEDBACK, defaults.pageTurnFeedback),
             pageTurnStyle = prefs.enumValue(KEY_PAGE_TURN_STYLE, defaults.pageTurnStyle),
+            keepScreenOnInViewer = prefs.getBoolean(KEY_KEEP_SCREEN_ON_IN_VIEWER, defaults.keepScreenOnInViewer),
+            remoteControlEnabled = prefs.getBoolean(KEY_REMOTE_CONTROL_ENABLED, defaults.remoteControlEnabled),
+            remoteUseDefaultPort = prefs.getBoolean(KEY_REMOTE_USE_DEFAULT_PORT, defaults.remoteUseDefaultPort),
+            remoteControlPort = prefs.getInt(KEY_REMOTE_CONTROL_PORT, defaults.remoteControlPort),
             hideCompleted = prefs.getBoolean(KEY_HIDE_COMPLETED, defaults.hideCompleted),
             theme = prefs.enumValue(KEY_THEME, defaults.theme),
             librarySort = prefs.sortConfig(KEY_LIBRARY_SORT_COLUMN, KEY_LIBRARY_SORT_DIRECTION, defaults.librarySort),
@@ -56,6 +60,10 @@ class LocalSettingsStore(context: Context) {
             .putBoolean(KEY_VOLUME_KEY_PAGING, settings.volumeKeyPaging)
             .putString(KEY_PAGE_TURN_FEEDBACK, settings.pageTurnFeedback.name)
             .putString(KEY_PAGE_TURN_STYLE, settings.pageTurnStyle.name)
+            .putBoolean(KEY_KEEP_SCREEN_ON_IN_VIEWER, settings.keepScreenOnInViewer)
+            .putBoolean(KEY_REMOTE_CONTROL_ENABLED, settings.remoteControlEnabled)
+            .putBoolean(KEY_REMOTE_USE_DEFAULT_PORT, settings.remoteUseDefaultPort)
+            .putInt(KEY_REMOTE_CONTROL_PORT, settings.remoteControlPort)
             .putBoolean(KEY_HIDE_COMPLETED, settings.hideCompleted)
             .putString(KEY_THEME, settings.theme.name)
             .putSortConfig(KEY_LIBRARY_SORT_COLUMN, KEY_LIBRARY_SORT_DIRECTION, settings.librarySort)
@@ -126,6 +134,10 @@ class LocalSettingsStore(context: Context) {
         private const val KEY_VOLUME_KEY_PAGING = "volumeKeyPaging"
         private const val KEY_PAGE_TURN_FEEDBACK = "pageTurnFeedback"
         private const val KEY_PAGE_TURN_STYLE = "pageTurnStyle"
+        private const val KEY_KEEP_SCREEN_ON_IN_VIEWER = "keepScreenOnInViewer"
+        private const val KEY_REMOTE_CONTROL_ENABLED = "remoteControl.enabled"
+        private const val KEY_REMOTE_USE_DEFAULT_PORT = "remoteControl.useDefaultPort"
+        private const val KEY_REMOTE_CONTROL_PORT = "remoteControl.port"
         private const val KEY_HIDE_COMPLETED = "hideCompleted"
         private const val KEY_THEME = "theme"
         private const val KEY_LIBRARY_SORT_COLUMN = "librarySort.column"
