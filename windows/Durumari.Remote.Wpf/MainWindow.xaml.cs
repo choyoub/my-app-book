@@ -47,7 +47,8 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
 
-        var executablePath = Environment.ProcessPath ?? typeof(MainWindow).Assembly.Location;
+        var executablePath = Environment.ProcessPath
+            ?? System.IO.Path.Combine(AppContext.BaseDirectory, "Durumari.Remote.exe");
         _appIcon = Drawing.Icon.ExtractAssociatedIcon(executablePath)
             ?? (Drawing.Icon)Drawing.SystemIcons.Application.Clone();
         _trayIcon = new Forms.NotifyIcon

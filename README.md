@@ -53,15 +53,16 @@ Windows 앱 동작:
 - 사용자가 Windows 앱에서 직접 `연결 끊기`를 선택한 경우에는 자동으로 재연결하지 않고 위젯을 숨깁니다.
 - 사용자가 트레이 메뉴에서 위젯을 숨기면 연결이 복구되어도 자동으로 다시 표시하지 않습니다. `리모콘 보임`을 선택하면 다시 표시됩니다.
 - Android 앱과 동일한 두루마리 아이콘을 실행 파일, 메인 창, 트레이에서 사용합니다.
-- 메인 창에서 위젯 투명도를 30~100%로 조절할 수 있습니다.
-- 메인 창에서 위젯 테마를 `시스템`, `라이트`, `다크` 중 선택할 수 있으며 기본값은 `시스템`입니다.
+- 메인 창에서 위젯 투명도를 20~100%로 조절할 수 있습니다.
+- 메인 창에서 위젯 테마를 `시스템`, `다크`, `라이트`, `아크릴` 중 선택할 수 있으며 기본값은 `시스템`입니다.
 - 위젯의 빈 테두리나 방향키 키캡을 마우스로 끌어 위치를 옮길 수 있으며 투명도와 마지막 위치가 저장됩니다.
 
 Tailscale이 연결된 신뢰 가능한 기기에서만 리모콘을 켜 두는 것을 권장합니다. 현재 MVP 프로토콜은 Tailscale의 암호화와 접근 제어를 전제로 하며 별도 앱 암호를 사용하지 않습니다. 리모콘 서버는 Android 앱이 화면에 보이는 동안만 동작합니다. Android 앱이 백그라운드로 이동하면 연결과 대기가 종료되며, 앱으로 돌아오면 다시 연결 대기 상태가 됩니다. Windows 리모콘이 연결 유지 상태라면 자동으로 다시 연결됩니다.
 
-### Windows 리모콘 빌드
+### Windows 리모콘 릴리스 빌드
 
-.NET 8 Desktop Runtime이 설치된 PC용 단일 실행 파일은 다음 스크립트로 만듭니다.
+64비트 Windows용 자체 포함 단일 실행 파일과 NSIS 설치 프로그램은 다음 스크립트로 만듭니다.
+빌드 PC에는 .NET SDK와 NSIS 3.x가 설치되어 있어야 합니다.
 
 ```powershell
 .\build-windows-remote.ps1
@@ -70,14 +71,19 @@ Tailscale이 연결된 신뢰 가능한 기기에서만 리모콘을 켜 두는 
 출력 위치:
 
 ```text
-windows/publish/Durumari.Remote.exe
+windows/publish/app/Durumari.Remote.exe
+windows/publish/Durumari-Remote-Setup-0.1.4-x64.exe
 ```
 
-.NET Runtime까지 포함한 독립 실행 파일이 필요하면 다음과 같이 빌드합니다.
+버전을 지정하려면 다음과 같이 빌드합니다.
 
 ```powershell
-.\build-windows-remote.ps1 -SelfContained
+.\build-windows-remote.ps1 -Version 0.1.4
 ```
+
+설치 프로그램은 `Program Files\Durumari Remote`에 앱을 설치하고 시작 메뉴 바로가기와
+Windows 앱 제거 항목을 등록합니다. 제거 시 실행 파일, 바로가기, 저장된 리모콘 설정을
+함께 정리합니다.
 
 ## 지원 문서
 

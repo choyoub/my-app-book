@@ -6,12 +6,19 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>disable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <AssemblyName>Durumari.Remote.Wpf</AssemblyName>
-    <ApplicationIcon>..\Durumari.Remote\Assets\durumari.ico</ApplicationIcon>
+    <RootNamespace>Durumari.Remote.Wpf</RootNamespace>
+    <AssemblyName>Durumari.Remote</AssemblyName>
+    <ApplicationIcon>Assets\durumari.ico</ApplicationIcon>
+    <Version>0.1.4</Version>
+    <AssemblyVersion>$(Version).0</AssemblyVersion>
+    <FileVersion>$(Version).0</FileVersion>
+    <Product>두루마리 Windows 리모콘</Product>
+    <Description>Android 두루마리 앱의 페이지를 제어하는 Windows 리모콘</Description>
+    <Company>Durumari</Company>
+    <Authors>Durumari</Authors>
   </PropertyGroup>
   <ItemGroup>
-    <Resource Include="..\Durumari.Remote\Assets\durumari-icon.png" Link="Assets\durumari-icon.png" />
-    <Resource Include="..\Durumari.Remote\Assets\durumari.ico" Link="Assets\durumari.ico" />
-    <Compile Include="..\Durumari.Remote\RemoteClient.cs" Link="RemoteClient.cs" />
+    <Resource Include="Assets\durumari-icon.png" />
+    <Resource Include="Assets\durumari.ico" />
   </ItemGroup>
 </Project>
