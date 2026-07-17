@@ -6,6 +6,7 @@
         SizeToContent="WidthAndHeight" WindowStartupLocation="Manual"
         PreviewKeyDown="RemoteWidgetWindow_PreviewKeyDown">
     <Window.Resources>
+        <SolidColorBrush x:Key="KeycapHighlightBrush" Color="#35FFFFFF"/>
         <Style x:Key="KeycapStyle" TargetType="Button">
             <Setter Property="Width" Value="64"/>
             <Setter Property="Height" Value="64"/>
@@ -21,7 +22,14 @@
                         <Grid>
                             <Border x:Name="Keycap" CornerRadius="14" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}">
                                 <Border.Effect><DropShadowEffect Color="#AA000000" BlurRadius="10" ShadowDepth="6" Opacity="0.65"/></Border.Effect>
-                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                <Grid>
+                                    <Border CornerRadius="13"
+                                            Margin="1"
+                                            BorderBrush="{DynamicResource KeycapHighlightBrush}"
+                                            BorderThickness="1,1,0,0"
+                                            IsHitTestVisible="False"/>
+                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                </Grid>
                             </Border>
                         </Grid>
                         <ControlTemplate.Triggers>

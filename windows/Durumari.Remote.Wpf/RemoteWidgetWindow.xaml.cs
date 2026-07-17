@@ -56,13 +56,36 @@ public partial class RemoteWidgetWindow : Window
         switch (_resolvedTheme)
         {
             case "light":
-                ApplyKeycapTheme(CreateGradient("#FFFFFFFF", "#FFECEEF3"), "#FFE2E8F0", "#FF1E293B");
+                ApplyKeycapTheme(
+                    CreateGradient("#FFFFFFFF", "#FFECEEF3"),
+                    "#FFE2E8F0",
+                    "#FF1E293B",
+                    "#70FFFFFF");
                 break;
             case "acrylic":
-                ApplyKeycapTheme(CreateGradient("#2EFFFFFF", "#0DFFFFFF"), "#40FFFFFF", "#FFFFFFFF");
+                if (systemIsDark)
+                {
+                    ApplyKeycapTheme(
+                        CreateGradient("#78495E73", "#4A2F4052"),
+                        "#8CA9BED2",
+                        "#FFFFFFFF",
+                        "#70FFFFFF");
+                }
+                else
+                {
+                    ApplyKeycapTheme(
+                        CreateGradient("#96F5F8FC", "#5EC8D5E2"),
+                        "#8A788DA2",
+                        "#FF203247",
+                        "#A8FFFFFF");
+                }
                 break;
             default:
-                ApplyKeycapTheme(CreateGradient("#FF383838", "#FF222222"), "#FF4A4A4A", "#FFFFFFFF");
+                ApplyKeycapTheme(
+                    CreateGradient("#FF383838", "#FF222222"),
+                    "#FF4A4A4A",
+                    "#FFFFFFFF",
+                    "#35FFFFFF");
                 break;
         }
     }
@@ -76,8 +99,14 @@ public partial class RemoteWidgetWindow : Window
     public void SetWidgetOpacity(int percent) =>
         Opacity = Math.Clamp(percent, 20, 100) / 100d;
 
-    private void ApplyKeycapTheme(Brush background, string borderHex, string foregroundHex)
+    private void ApplyKeycapTheme(
+        Brush background,
+        string borderHex,
+        string foregroundHex,
+        string highlightHex)
     {
+        Resources["KeycapHighlightBrush"] =
+            new SolidColorBrush((Color)ColorConverter.ConvertFromString(highlightHex));
         foreach (var keycap in new[] { LeftKeycap, RightKeycap })
         {
             keycap.Background = background;
