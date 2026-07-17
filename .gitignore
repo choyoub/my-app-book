@@ -9,7 +9,7 @@ app/build/
 apk/*.apk
 windows/**/bin/
 windows/**/obj/
-windows/publish/
+windows/publish*/
 
 # Local verification artifacts
 /*.png

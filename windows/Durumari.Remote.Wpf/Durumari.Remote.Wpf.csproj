@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>Durumari.Remote.Wpf</AssemblyName>
+    <ApplicationIcon>..\Durumari.Remote\Assets\durumari.ico</ApplicationIcon>
+  </PropertyGroup>
+  <ItemGroup>
+    <Resource Include="..\Durumari.Remote\Assets\durumari-icon.png" Link="Assets\durumari-icon.png" />
+    <Resource Include="..\Durumari.Remote\Assets\durumari.ico" Link="Assets\durumari.ico" />
+    <Compile Include="..\Durumari.Remote\RemoteClient.cs" Link="RemoteClient.cs" />
+  </ItemGroup>
+</Project>
