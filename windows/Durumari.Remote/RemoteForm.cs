@@ -70,6 +70,8 @@ internal sealed class RemoteForm : Form
         Opacity = Math.Clamp(percent, 30, 100) / 100d;
     }
 
+    protected override bool ShowWithoutActivation => true;
+
     public void SetThemeMode(WidgetThemeMode themeMode)
     {
         _themeMode = themeMode;

@@ -1,4 +1,5 @@
 using Microsoft.Win32;
+using System.Runtime.InteropServices;
 
 namespace Durumari.Remote;
 
@@ -20,8 +21,6 @@ internal sealed class MainForm : Form
     private readonly Label _statusLabel = new();
     private readonly Button _connectButton = new();
     private readonly NotifyIcon _trayIcon;
-    private readonly ToolStripMenuItem _remoteMenuItem;
-    private readonly ToolStripMenuItem _connectionMenuItem;
     private readonly RemoteForm _remoteForm;
     private bool _exiting;
     private bool _loadingSettings;
@@ -43,32 +42,22 @@ internal sealed class MainForm : Form
         MinimumSize = new Size(500, 455);
         StartPosition = FormStartPosition.CenterScreen;
 
-        var menu = new ContextMenuStrip();
-        var openItem = menu.Items.Add("열기");
-        _remoteMenuItem = (ToolStripMenuItem)menu.Items.Add("리모콘 보임");
-        _connectionMenuItem = (ToolStripMenuItem)menu.Items.Add("연결");
-        menu.Items.Add(new ToolStripSeparator());
-        var exitItem = menu.Items.Add("종료");
-
         _trayIcon = new NotifyIcon
         {
             Icon = _appIcon,
             Text = "두루마리 리모콘 · 연결 안 됨",
-            ContextMenuStrip = menu,
             Visible = true,
         };
         // 트레이 아이콘 자체 클릭에는 의도적으로 동작을 연결하지 않습니다.
-        openItem.Click += (_, _) => OpenMainWindow();
-        _remoteMenuItem.Click += (_, _) => ToggleRemoteWindow();
-        _connectionMenuItem.Click += async (_, _) => await ToggleConnectionAsync();
-        exitItem.Click += async (_, _) => await ExitApplicationAsync();
+        // WinForms ContextMenuStrip은 활성 창과 트레이가 서로 다른 DPI의
+        // 모니터에 있을 때 잘못된 크기와 좌표를 사용할 수 있어 사용하지 않습니다.
+        _trayIcon.MouseUp += OnTrayIconMouseUp;
 
         _remoteForm = new RemoteForm(
             () => SendWidgetCommandAsync(_client.PreviousPageAsync),
             () => SendWidgetCommandAsync(_client.NextPageAsync));
         _remoteForm.VisibleChanged += (_, _) =>
         {
-            UpdateRemoteMenuText();
             if (!_remoteForm.Visible) SaveSettings();
         };
         _remoteForm.LocationChanged += (_, _) =>
@@ -351,14 +340,39 @@ internal sealed class MainForm : Form
             _widgetHiddenByUser = false;
             ShowRemoteWindow();
         }
-        UpdateRemoteMenuText();
     }
 
     private void ShowRemoteWindow()
     {
         _remoteForm.Location = ResolveWidgetPosition();
         _remoteForm.Show();
-        _remoteForm.Activate();
+    }
+
+    private async void OnTrayIconMouseUp(object? sender, MouseEventArgs eventArgs)
+    {
+        if (eventArgs.Button != MouseButtons.Right) return;
+
+        var selectedCommand = NativeTrayMenu.Show(
+            Handle,
+            _remoteForm.Visible,
+            _widgetActivated,
+            _connectionRequested || _client.State is ConnectionState.Connected or ConnectionState.Connecting);
+
+        switch (selectedCommand)
+        {
+            case NativeTrayMenu.OpenCommand:
+                OpenMainWindow();
+                break;
+            case NativeTrayMenu.RemoteCommand:
+                ToggleRemoteWindow();
+                break;
+            case NativeTrayMenu.ConnectionCommand:
+                await ToggleConnectionAsync();
+                break;
+            case NativeTrayMenu.ExitCommand:
+                await ExitApplicationAsync();
+                break;
+        }
     }
 
     internal void OpenMainWindow()
@@ -410,9 +424,7 @@ internal sealed class MainForm : Form
         var connected = _client.State == ConnectionState.Connected;
         var connectionActive = _connectionRequested || connected || _client.State == ConnectionState.Connecting;
         _connectButton.Text = connectionActive ? "연결 끊기" : "연결";
-        _connectionMenuItem.Text = connectionActive ? "끊기" : "연결";
         _trayIcon.Text = $"두루마리 리모콘 · {text}";
-        _remoteMenuItem.Enabled = _widgetActivated;
         if (connected)
         {
             if (!_remoteForm.Visible && !_widgetHiddenByUser) ShowRemoteWindow();
@@ -421,12 +433,6 @@ internal sealed class MainForm : Form
         {
             _remoteForm.Hide();
         }
-        UpdateRemoteMenuText();
-    }
-
-    private void UpdateRemoteMenuText()
-    {
-        _remoteMenuItem.Text = _remoteForm.Visible ? "리모콘 숨김" : "리모콘 보임";
     }
 
     private void OnFormClosing(object? sender, FormClosingEventArgs eventArgs)
@@ -502,5 +508,113 @@ internal sealed class MainForm : Form
         }
         var area = Screen.FromControl(this).WorkingArea;
         return new Point(area.Right - _remoteForm.Width - 24, area.Bottom - _remoteForm.Height - 24);
+    }
+
+    private static class NativeTrayMenu
+    {
+        public const uint OpenCommand = 1;
+        public const uint RemoteCommand = 2;
+        public const uint ConnectionCommand = 3;
+        public const uint ExitCommand = 4;
+
+        private const uint MfString = 0x0000;
+        private const uint MfGrayEd = 0x0001;
+        private const uint MfSeparator = 0x0800;
+        private const uint TpmRightButton = 0x0002;
+        private const uint TpmRightAlign = 0x0008;
+        private const uint TpmBottomAlign = 0x0020;
+        private const uint TpmReturnCmd = 0x0100;
+        private const uint WmNull = 0x0000;
+
+        public static uint Show(
+            IntPtr ownerHandle,
+            bool remoteVisible,
+            bool remoteEnabled,
+            bool connectionActive)
+        {
+            var menuHandle = CreatePopupMenu();
+            if (menuHandle == IntPtr.Zero) return 0;
+
+            try
+            {
+                AppendMenu(menuHandle, MfString, OpenCommand, "열기");
+                AppendMenu(
+                    menuHandle,
+                    MfString | (remoteEnabled ? 0 : MfGrayEd),
+                    RemoteCommand,
+                    remoteVisible ? "리모콘 숨김" : "리모콘 보임");
+                AppendMenu(
+                    menuHandle,
+                    MfString,
+                    ConnectionCommand,
+                    connectionActive ? "끊기" : "연결");
+                AppendMenu(menuHandle, MfSeparator, 0, null);
+                AppendMenu(menuHandle, MfString, ExitCommand, "종료");
+
+                if (!GetCursorPos(out var cursorPosition)) return 0;
+
+                SetForegroundWindow(ownerHandle);
+                var command = TrackPopupMenuEx(
+                    menuHandle,
+                    TpmRightButton | TpmRightAlign | TpmBottomAlign | TpmReturnCmd,
+                    cursorPosition.X,
+                    cursorPosition.Y,
+                    ownerHandle,
+                    IntPtr.Zero);
+                PostMessage(ownerHandle, WmNull, IntPtr.Zero, IntPtr.Zero);
+                return command;
+            }
+            finally
+            {
+                DestroyMenu(menuHandle);
+            }
+        }
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr CreatePopupMenu();
+
+        [DllImport("user32.dll", EntryPoint = "AppendMenuW", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool AppendMenu(
+            IntPtr menuHandle,
+            uint flags,
+            uint itemId,
+            string? itemText);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool DestroyMenu(IntPtr menuHandle);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetCursorPos(out NativePoint point);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetForegroundWindow(IntPtr windowHandle);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern uint TrackPopupMenuEx(
+            IntPtr menuHandle,
+            uint flags,
+            int x,
+            int y,
+            IntPtr ownerHandle,
+            IntPtr parameters);
+
+        [DllImport("user32.dll", EntryPoint = "PostMessageW", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool PostMessage(
+            IntPtr windowHandle,
+            uint message,
+            IntPtr wParam,
+            IntPtr lParam);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private readonly struct NativePoint
+        {
+            public readonly int X;
+            public readonly int Y;
+        }
     }
 }
