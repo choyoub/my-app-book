@@ -36,6 +36,7 @@ public partial class MainWindow : Window
     private bool _connectionRequested;
     private bool _connectionAttemptInProgress;
     private bool _automaticReconnectPaused;
+    private bool _widgetActivated;
     private bool _widgetHiddenByUser;
     private bool _hasWidgetPosition;
     private bool _exiting;
@@ -186,6 +187,7 @@ public partial class MainWindow : Window
             _client.State is RemoteConnectionState.Connected or RemoteConnectionState.Connecting)
         {
             StopAutomaticReconnect();
+            _widgetActivated = false;
             _widgetHiddenByUser = false;
             HideRemoteWidget();
             await _client.DisconnectAsync();
@@ -290,10 +292,16 @@ public partial class MainWindow : Window
 
     private async Task SendWidgetCommandAsync(Func<Task> sendCommand)
     {
-        if (_client.State == RemoteConnectionState.Connected)
+        if (_client.State != RemoteConnectionState.Connected)
         {
-            await sendCommand();
+            if (!_widgetActivated || _connectionAttemptInProgress) return;
+            _connectionRequested = true;
+            _automaticReconnectPaused = false;
+            _reconnectAttempt = 0;
+            await TryConnectAsync();
         }
+
+        if (_client.State == RemoteConnectionState.Connected) await sendCommand();
     }
 
     private void OnClientStateChanged(object? sender, EventArgs e)
@@ -312,6 +320,7 @@ public partial class MainWindow : Window
             _reconnectTimer.Stop();
             _automaticReconnectPaused = false;
             _reconnectAttempt = 0;
+            _widgetActivated = true;
         }
         else if (_connectionRequested &&
                  !_connectionAttemptInProgress &&
@@ -335,7 +344,7 @@ public partial class MainWindow : Window
         var text = reconnectWaiting
             ? "재연결 대기 중"
             : reconnectPaused
-                ? "연결 끊김"
+                ? "연결 끊김 · 위젯 버튼으로 재연결"
                 : presentationState switch
                 {
                     RemoteConnectionState.Connected => "연결 성공",
@@ -353,7 +362,7 @@ public partial class MainWindow : Window
         {
             if (!_widgetHiddenByUser) ShowRemoteWidget();
         }
-        else
+        else if (!_widgetActivated)
         {
             HideRemoteWidget();
         }
@@ -490,7 +499,7 @@ public partial class MainWindow : Window
 
     private void ToggleRemoteWidget()
     {
-        if (_client.State != RemoteConnectionState.Connected) return;
+        if (!_widgetActivated) return;
         if (_remoteWidget?.IsVisible == true)
         {
             _widgetHiddenByUser = true;
@@ -652,7 +661,7 @@ public partial class MainWindow : Window
         var command = NativeTrayMenu.Show(
             new WindowInteropHelper(this).Handle,
             _remoteWidget?.IsVisible == true,
-            _client.State == RemoteConnectionState.Connected,
+            _widgetActivated,
             _connectionRequested ||
             _client.State is RemoteConnectionState.Connected or RemoteConnectionState.Connecting);
 
