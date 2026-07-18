@@ -14,6 +14,7 @@ public partial class RemoteWidgetWindow : Window
     private readonly Random _random = new();
     private string _resolvedTheme = "dark";
     private Color _effectColor = Color.FromRgb(0x00, 0x78, 0xD4);
+    private Color _keycapForegroundColor = Colors.White;
     private double _compactHandleHeight = 10;
     private bool _effectsEnabled = true;
     private bool _soundEnabled = true;
@@ -53,6 +54,12 @@ public partial class RemoteWidgetWindow : Window
     {
         _resolvedTheme = theme == "system" ? (systemIsDark ? "dark" : "light") : theme;
         _effectColor = windowsAccent;
+        var accentBrush = new SolidColorBrush(_effectColor);
+        DragHandle.Background = new SolidColorBrush(
+            KeycapGap.IsMouseOver
+                ? _effectColor
+                : Color.FromRgb(0x66, 0x66, 0x66));
+        DragLabel.Foreground = accentBrush;
         switch (_resolvedTheme)
         {
             case "light":
@@ -88,6 +95,9 @@ public partial class RemoteWidgetWindow : Window
                     "#35FFFFFF");
                 break;
         }
+
+        UpdateArrowColor(LeftKeycap, LeftArrowPath);
+        UpdateArrowColor(RightKeycap, RightArrowPath);
     }
 
     public void SetFeedbackOptions(bool effectsEnabled, bool soundEnabled)
@@ -107,12 +117,43 @@ public partial class RemoteWidgetWindow : Window
     {
         Resources["KeycapHighlightBrush"] =
             new SolidColorBrush((Color)ColorConverter.ConvertFromString(highlightHex));
+        _keycapForegroundColor = (Color)ColorConverter.ConvertFromString(foregroundHex);
         foreach (var keycap in new[] { LeftKeycap, RightKeycap })
         {
             keycap.Background = background;
             keycap.BorderBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString(borderHex));
-            keycap.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(foregroundHex));
+            keycap.Foreground = new SolidColorBrush(_keycapForegroundColor);
         }
+    }
+
+    private void Keycap_MouseEnter(object sender, MouseEventArgs e)
+    {
+        if (ReferenceEquals(sender, LeftKeycap))
+        {
+            LeftArrowPath.Stroke = new SolidColorBrush(_effectColor);
+        }
+        else if (ReferenceEquals(sender, RightKeycap))
+        {
+            RightArrowPath.Stroke = new SolidColorBrush(_effectColor);
+        }
+    }
+
+    private void Keycap_MouseLeave(object sender, MouseEventArgs e)
+    {
+        if (ReferenceEquals(sender, LeftKeycap))
+        {
+            LeftArrowPath.Stroke = new SolidColorBrush(_keycapForegroundColor);
+        }
+        else if (ReferenceEquals(sender, RightKeycap))
+        {
+            RightArrowPath.Stroke = new SolidColorBrush(_keycapForegroundColor);
+        }
+    }
+
+    private void UpdateArrowColor(Button keycap, Shape arrow)
+    {
+        arrow.Stroke = new SolidColorBrush(
+            keycap.IsMouseOver ? _effectColor : _keycapForegroundColor);
     }
 
     private static Brush CreateGradient(string first, string second) => new LinearGradientBrush(
@@ -122,7 +163,7 @@ public partial class RemoteWidgetWindow : Window
 
     private void DragHandleArea_MouseEnter(object sender, MouseEventArgs e)
     {
-        DragHandle.Background = new SolidColorBrush(Color.FromRgb(0xA3, 0xA3, 0xA3));
+        DragHandle.Background = new SolidColorBrush(_effectColor);
         DragLabel.Visibility = Visibility.Visible;
         var expandedHeight = Math.Max(_compactHandleHeight, LeftKeycap.ActualHeight - 20);
         DragHandle.BeginAnimation(HeightProperty, new DoubleAnimation(
