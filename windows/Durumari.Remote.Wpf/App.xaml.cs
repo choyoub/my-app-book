@@ -1,6 +1,8 @@
 using System;
 using System.Threading;
 using System.Windows;
+using System.Windows.Interop;
+using System.Windows.Media;
 
 namespace Durumari.Remote.Wpf;
 
@@ -19,6 +21,7 @@ public partial class App : System.Windows.Application
 
     protected override void OnStartup(StartupEventArgs e)
     {
+        RenderOptions.ProcessRenderMode = RenderMode.SoftwareOnly;
         base.OnStartup(e);
 
         _activationEvent = new EventWaitHandle(
