@@ -1,6 +1,7 @@
 using System;
 using System.ComponentModel;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -19,6 +20,10 @@ namespace Durumari.Remote.Wpf;
 public partial class MainWindow : Window
 {
     private const string RegistryPath = @"Software\Durumari\Remote";
+    private const int DwmWindowCornerPreference = 33;
+    private const int DwmBorderColor = 34;
+    private const int DwmDoNotRound = 1;
+    private const int DwmColorNone = unchecked((int)0xFFFFFFFE);
     private static readonly int[] ReconnectDelaysMs = [1_000, 2_000, 4_000, 8_000, 10_000];
 
     private readonly RemoteClient _client = new();
@@ -86,6 +91,34 @@ public partial class MainWindow : Window
         Closing += OnWindowClosing;
         Closed += OnWindowClosed;
     }
+
+    protected override void OnSourceInitialized(EventArgs e)
+    {
+        base.OnSourceInitialized(e);
+        if (!OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000)) return;
+
+        var handle = new WindowInteropHelper(this).Handle;
+        var cornerPreference = DwmDoNotRound;
+        _ = DwmSetWindowAttribute(
+            handle,
+            DwmWindowCornerPreference,
+            ref cornerPreference,
+            sizeof(int));
+
+        var borderColor = DwmColorNone;
+        _ = DwmSetWindowAttribute(
+            handle,
+            DwmBorderColor,
+            ref borderColor,
+            sizeof(int));
+    }
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(
+        IntPtr windowHandle,
+        int attribute,
+        ref int attributeValue,
+        int attributeSize);
 
     private void OnUserPreferenceChanged(object? sender, UserPreferenceChangedEventArgs e) =>
         Dispatcher.BeginInvoke(ApplySystemTheme);
