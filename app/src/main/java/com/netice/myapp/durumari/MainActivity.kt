@@ -38,6 +38,7 @@ import android.window.OnBackInvokedCallback
 import android.window.OnBackInvokedDispatcher
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
@@ -137,6 +138,8 @@ class MainActivity : Activity() {
     @Volatile
     private var activityDestroyed: Boolean = false
     private var activityStarted: Boolean = false
+    private var librarySyncInProgress: Boolean = false
+    private var mainScreenVisible: Boolean = false
     private val readerTypefaceCache = object : LinkedHashMap<String, Typeface>(MAX_READER_TYPEFACE_CACHE, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Typeface>?): Boolean {
             return size > MAX_READER_TYPEFACE_CACHE
@@ -222,6 +225,11 @@ class MainActivity : Activity() {
         super.onStart()
         activityStarted = true
         if (::remoteControlServer.isInitialized) applyRemoteControlSettings()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        syncRegisteredFolders()
     }
 
     override fun onStop() {
@@ -586,6 +594,7 @@ class MainActivity : Activity() {
     }
 
     private fun showRestoredViewerAfterIntro(loaded: ViewerLoadResult) {
+        mainScreenVisible = false
         val theme = DurumariThemes.tokens(settings.theme)
         configureSystemBars(theme)
         rootLayer = DurumariRootLayer(this).apply {
@@ -630,6 +639,7 @@ class MainActivity : Activity() {
     }
 
     private fun showMainScreen() {
+        mainScreenVisible = true
         handler.removeCallbacksAndMessages(null)
         stopScrollAnimation()
         updateKeepScreenOn(viewerActive = false)
@@ -895,39 +905,52 @@ class MainActivity : Activity() {
         }
         val activeFolder = folders.firstOrNull { it.folderId == settings.activeFolderId } ?: folders.firstOrNull()
         if (activeFolder != null) {
+            val folderTitleMaxWidth = (
+                resources.displayMetrics.widthPixels -
+                    dp(32 + 38 + 8 + 38 + 8 + 6 + 24)
+                ).coerceAtLeast(dp(64))
             val chip = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(dp(3), dp(3), dp(3), dp(3))
                 background = roundedRect(theme.accent, 14, strokeColor = theme.border)
+                setUiClickListener(UiFeedbackKind.OPEN) { showFolderSelectionSheet(theme) }
             }
-            chip.addView(text(activeFolder.displayName, theme.accentForeground, 13f, bold = true, gravity = Gravity.CENTER).apply {
+            chip.addView(ImageView(this).apply {
+                setImageResource(R.drawable.ic_expand_more)
+                imageTintList = ColorStateList.valueOf(theme.accentForeground)
+                contentDescription = "등록 폴더 선택"
+                setPadding(dp(2), dp(2), dp(2), dp(2))
+            }, linear(dp(24), dp(24), left = 5))
+            chip.addView(text(activeFolder.displayName, theme.accentForeground, 13f, bold = true, gravity = Gravity.CENTER_VERTICAL).apply {
                 minHeight = dp(30)
+                minWidth = dp(64)
+                maxWidth = folderTitleMaxWidth
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
-                setPadding(dp(10), 0, dp(10), 0)
+                setPadding(dp(4), 0, dp(10), 0)
             }, linear(wrap, dp(30)))
-            chip.addView(text("×", theme.accentForeground, 16f, bold = true, gravity = Gravity.CENTER).apply {
-                background = roundedRect(Color.argb(61, 255, 255, 255), 10)
-                setUiClickListener {
-                    appStore.removeFolder(activeFolder.folderId)
-                    clearViewerResume()
-                    settings = settings.copy(activeFolderId = null)
-                    settingsStore.save(settings)
-                    reloadLibraryState()
-                    showMainScreen()
-                }
-            }, linear(dp(22), dp(22), left = 4, right = 1))
             row.addView(chip, linear(wrap, dp(38)))
         }
+        row.addView(View(this), LinearLayout.LayoutParams(0, dp(1), 1f))
 
-        val addFolder = text("+ 폴더", theme.accentText, 13f, bold = true, gravity = Gravity.CENTER).apply {
+        if (activeFolder != null) {
+            val refreshFolder = text("↻", theme.accentText, 18f, bold = true, gravity = Gravity.CENTER).apply {
+                minHeight = dp(36)
+                contentDescription = "폴더 새로고침"
+                background = roundedRect(theme.card, 14, strokeColor = theme.border)
+                setUiClickListener { syncRegisteredFolders(showResultToast = true) }
+            }
+            row.addView(refreshFolder, linear(dp(38), dp(36), left = 8))
+        }
+
+        val addFolder = text("+", theme.accentText, 20f, bold = true, gravity = Gravity.CENTER).apply {
             minHeight = dp(36)
-            setPadding(dp(12), 0, dp(12), 0)
+            contentDescription = "새 폴더 등록"
             background = roundedRect(theme.card, 14, strokeColor = theme.border)
             setUiClickListener(UiFeedbackKind.OPEN) { openFolderPicker() }
         }
-        row.addView(addFolder, linear(wrap, dp(36), left = if (activeFolder != null) 8 else 0))
+        row.addView(addFolder, linear(dp(38), dp(36), left = if (activeFolder != null) 8 else 0))
         return row
     }
 
@@ -1599,6 +1622,55 @@ class MainActivity : Activity() {
         }.start()
     }
 
+    private fun syncRegisteredFolders(showResultToast: Boolean = false) {
+        if (!::appStore.isInitialized || !::documentScanner.isInitialized) return
+        if (librarySyncInProgress) {
+            if (showResultToast) Toast.makeText(this, "폴더를 새로고침하는 중입니다.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val registeredFolders = appStore.listFolders()
+        if (registeredFolders.isEmpty()) return
+
+        librarySyncInProgress = true
+        Thread {
+            var syncedDocumentCount = 0
+            var failedFolderCount = 0
+            registeredFolders.forEach { folder ->
+                runCatching {
+                    val scanned = documentScanner.scanFolder(folder.folderId, Uri.parse(folder.treeUri))
+                    syncedDocumentCount += scanned.size
+                    appStore.replaceFolderDocuments(
+                        folder.copy(
+                            lastSyncedAt = System.currentTimeMillis(),
+                            permissionStatus = FolderPermissionStatus.GRANTED,
+                        ),
+                        scanned,
+                    )
+                }.onFailure {
+                    failedFolderCount += 1
+                    appStore.upsertFolder(folder.copy(permissionStatus = FolderPermissionStatus.FAILED))
+                }
+            }
+            runOnUiThread {
+                librarySyncInProgress = false
+                if (activityDestroyed) return@runOnUiThread
+                reloadLibraryState()
+                if (mainScreenVisible) {
+                    val theme = DurumariThemes.tokens(settings.theme)
+                    rootLayer?.setScreenContent(createMainContent(theme))
+                }
+                if (showResultToast) {
+                    val message = if (failedFolderCount == 0) {
+                        "${syncedDocumentCount}개 문서를 새로고침했습니다."
+                    } else {
+                        "일부 폴더를 새로고침하지 못했습니다."
+                    }
+                    Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+                }
+            }
+        }.start()
+    }
+
     private fun defaultFolderName(uri: Uri): String {
         val raw = Uri.decode(uri.lastPathSegment ?: "")
         return raw.substringAfterLast(':').substringAfterLast('/').ifBlank { "소설" }
@@ -1648,6 +1720,7 @@ class MainActivity : Activity() {
         targetOffset: Int? = null,
         forceEncoding: String? = null,
     ) {
+        mainScreenVisible = false
         handler.removeCallbacksAndMessages(null)
         stopScrollAnimation()
         activeReaderCanvas = null
@@ -3016,6 +3089,125 @@ class MainActivity : Activity() {
         }, linear(match, dp(48), top = 24))
 
         rootLayer?.showBottomSheet(sheet, theme, dimColor = Color.argb(166, 0, 0, 0))
+    }
+
+    private fun showFolderSelectionSheet(theme: ThemeTokens) {
+        playUiFeedback(UiFeedbackKind.OPEN)
+        val sheet = createSheetSurface(theme)
+        sheet.addView(createSheetHandle(theme), linear(dp(42), dp(5), top = 17, bottom = 18).apply { gravity = Gravity.CENTER_HORIZONTAL })
+        sheet.addView(
+            createSheetHeader(theme, "등록 폴더", "${folders.size}개 폴더 중 사용할 폴더를 선택하세요"),
+            linear(match, wrap, bottom = 16),
+        )
+
+        val folderList = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        folders.forEachIndexed { index, folder ->
+            val isActive = folder.folderId == settings.activeFolderId
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                background = roundedRect(
+                    theme.bg,
+                    12,
+                    strokeColor = if (isActive) theme.accent else theme.border,
+                )
+                setPadding(dp(4), dp(4), dp(4), dp(4))
+            }
+            val selectArea = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setUiClickListener {
+                    settings = settings.copy(activeFolderId = folder.folderId)
+                    settingsStore.save(settings)
+                    reloadLibraryState()
+                    rootLayer?.dismissOverlay()
+                    showMainScreen()
+                }
+            }
+            selectArea.addView(text(if (isActive) "✓" else "", theme.accentText, 15f, bold = true, gravity = Gravity.CENTER).apply {
+                contentDescription = if (isActive) "선택됨" else null
+            }, linear(dp(30), dp(48)))
+            selectArea.addView(text(folder.displayName, theme.text, 15f, bold = false, gravity = Gravity.CENTER_VERTICAL).apply {
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+                setPadding(0, 0, dp(12), 0)
+            }, LinearLayout.LayoutParams(0, dp(48), 1f))
+            row.addView(selectArea, LinearLayout.LayoutParams(0, dp(48), 1f))
+            row.addView(text("×", theme.secondary, 18f, bold = true, gravity = Gravity.CENTER).apply {
+                contentDescription = "${folder.displayName} 폴더 삭제"
+                background = roundedRect(theme.card, 10, strokeColor = theme.border)
+                setUiClickListener {
+                    showFolderDeleteConfirmation(theme, folder)
+                }
+            }, linear(dp(42), dp(42), left = 6))
+            folderList.addView(row, linear(match, dp(56), top = if (index == 0) 0 else 8))
+        }
+
+        val scroll = ScrollView(this).apply {
+            isFillViewport = true
+            isVerticalScrollBarEnabled = true
+            scrollBarStyle = View.SCROLLBARS_INSIDE_INSET
+            overScrollMode = ScrollView.OVER_SCROLL_IF_CONTENT_SCROLLS
+            addView(folderList, FrameLayout.LayoutParams(match, wrap))
+        }
+        val listHeight = (folders.size * 64).coerceIn(64, 320)
+        sheet.addView(scroll, linear(match, dp(listHeight)))
+        sheet.addView(text("+ 새 폴더 등록", theme.accentForeground, 15f, bold = true, gravity = Gravity.CENTER).apply {
+            background = roundedRect(theme.accent, 12)
+            setUiClickListener(UiFeedbackKind.OPEN) {
+                rootLayer?.dismissOverlay()
+                openFolderPicker()
+            }
+        }, linear(match, dp(48), top = 16))
+
+        rootLayer?.showBottomSheet(sheet, theme, dimColor = Color.argb(166, 0, 0, 0))
+    }
+
+    private fun showFolderDeleteConfirmation(theme: ThemeTokens, folder: FolderRecord) {
+        val dialog = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(22), dp(20), dp(22), dp(18))
+            background = roundedRect(theme.card, 18, strokeColor = theme.border)
+        }
+        dialog.addView(text("폴더 삭제", theme.text, 18f, bold = true), linear(match, wrap))
+        dialog.addView(
+            text("'${folder.displayName}' 폴더 등록을 삭제할까요?\n읽기 기록과 책갈피도 함께 삭제됩니다.", theme.secondary, 14f),
+            linear(match, wrap, top = 10),
+        )
+
+        val actions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        actions.addView(text("취소", theme.text, 15f, bold = true, gravity = Gravity.CENTER).apply {
+            background = roundedRect(theme.bg, 12, strokeColor = theme.border)
+            setUiClickListener(UiFeedbackKind.CLOSE) { showFolderSelectionSheet(theme) }
+        }, LinearLayout.LayoutParams(0, dp(44), 1f))
+        actions.addView(text("삭제", theme.accentForeground, 15f, bold = true, gravity = Gravity.CENTER).apply {
+            background = roundedRect(theme.accent, 12)
+            setUiClickListener {
+                val deletingActiveFolder = folder.folderId == settings.activeFolderId
+                appStore.removeFolder(folder.folderId)
+                if (deletingActiveFolder) {
+                    clearViewerResume()
+                    settings = settings.copy(activeFolderId = null)
+                    settingsStore.save(settings)
+                }
+                reloadLibraryState()
+                rootLayer?.dismissOverlay()
+                showMainScreen()
+                Toast.makeText(this@MainActivity, "폴더 등록을 삭제했습니다.", Toast.LENGTH_SHORT).show()
+            }
+        }, LinearLayout.LayoutParams(0, dp(44), 1f).apply { leftMargin = dp(10) })
+        dialog.addView(actions, linear(match, wrap, top = 18))
+
+        rootLayer?.showDialog(
+            dialog,
+            dimColor = Color.argb(166, 0, 0, 0),
+            dismissOnDim = false,
+        )
     }
 
     private fun createPreview(theme: ThemeTokens, previewSettings: ReaderSettings): View {
