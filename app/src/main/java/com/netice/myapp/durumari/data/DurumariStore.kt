@@ -38,19 +38,26 @@ class DurumariStore(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
     }
 
     fun listDocuments(folderId: String? = null, includeText: Boolean = false): List<DocumentRecord> {
-        val columns = if (includeText) DOCUMENT_COLUMNS_WITH_TEXT else DOCUMENT_COLUMNS_WITHOUT_TEXT
         val selection = folderId?.let { "folderId = ?" }
         val args = folderId?.let { arrayOf(it) }
-        return readableDatabase.queryList("documents", columns, selection, args, "modifiedAt DESC") {
-            toDocumentRecord(includeText)
+        val db = readableDatabase
+        val documents = db.queryList("documents", DOCUMENT_COLUMNS_WITHOUT_TEXT, selection, args, "modifiedAt DESC") {
+            toDocumentRecord(includeText = false)
+        }
+        return if (includeText) {
+            documents.map { document ->
+                document.copy(text = db.readDocumentTextInChunks(document.documentId))
+            }
+        } else {
+            documents
         }
     }
 
     fun getDocument(documentId: String, includeText: Boolean = true): DocumentRecord? {
-        val columns = if (includeText) DOCUMENT_COLUMNS_WITH_TEXT else DOCUMENT_COLUMNS_WITHOUT_TEXT
-        return readableDatabase.query(
+        val db = readableDatabase
+        val document = db.query(
             "documents",
-            columns,
+            DOCUMENT_COLUMNS_WITHOUT_TEXT,
             "documentId = ?",
             arrayOf(documentId),
             null,
@@ -58,7 +65,12 @@ class DurumariStore(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
             null,
             "1",
         ).use { cursor ->
-            if (cursor.moveToFirst()) cursor.toDocumentRecord(includeText) else null
+            if (cursor.moveToFirst()) cursor.toDocumentRecord(includeText = false) else null
+        }
+        return if (document != null && includeText) {
+            document.copy(text = db.readDocumentTextInChunks(documentId))
+        } else {
+            document
         }
     }
 
@@ -171,10 +183,48 @@ class DurumariStore(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
     }
 
     private fun listDocuments(db: SQLiteDatabase, folderId: String, includeText: Boolean): List<DocumentRecord> {
-        val columns = if (includeText) DOCUMENT_COLUMNS_WITH_TEXT else DOCUMENT_COLUMNS_WITHOUT_TEXT
-        return db.queryList("documents", columns, "folderId = ?", arrayOf(folderId), "modifiedAt DESC") {
-            toDocumentRecord(includeText)
+        val documents = db.queryList(
+            "documents",
+            DOCUMENT_COLUMNS_WITHOUT_TEXT,
+            "folderId = ?",
+            arrayOf(folderId),
+            "modifiedAt DESC",
+        ) {
+            toDocumentRecord(includeText = false)
         }
+        return if (includeText) {
+            documents.map { document ->
+                document.copy(text = db.readDocumentTextInChunks(document.documentId))
+            }
+        } else {
+            documents
+        }
+    }
+
+    private fun SQLiteDatabase.readDocumentTextInChunks(documentId: String): String? {
+        val textLength = rawQuery(
+            "SELECT text IS NULL, length(text) FROM documents WHERE documentId = ? LIMIT 1",
+            arrayOf(documentId),
+        ).use { cursor ->
+            if (!cursor.moveToFirst() || cursor.getInt(0) == 1) return null
+            cursor.getInt(1)
+        }
+        if (textLength == 0) return ""
+
+        val text = StringBuilder(textLength)
+        var start = 1
+        while (start <= textLength) {
+            rawQuery(
+                "SELECT substr(text, ?, ?) FROM documents WHERE documentId = ? LIMIT 1",
+                arrayOf(start.toString(), TEXT_CHUNK_SIZE.toString(), documentId),
+            ).use { cursor ->
+                if (cursor.moveToFirst() && !cursor.isNull(0)) {
+                    text.append(cursor.getString(0))
+                }
+            }
+            start += TEXT_CHUNK_SIZE
+        }
+        return text.toString()
     }
 
     private inline fun <T> withWritableTransaction(block: (SQLiteDatabase) -> T): T {
@@ -430,6 +480,7 @@ class DurumariStore(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
     private companion object {
         private const val DB_NAME = "durumari.db"
         private const val DB_VERSION = 1
+        private const val TEXT_CHUNK_SIZE = 128 * 1024
         private val DOCUMENT_COLUMNS_WITHOUT_TEXT = arrayOf(
             "documentId",
             "folderId",
@@ -445,6 +496,5 @@ class DurumariStore(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
             "textEncodingSource",
             "detectedTextEncoding",
         )
-        private val DOCUMENT_COLUMNS_WITH_TEXT = DOCUMENT_COLUMNS_WITHOUT_TEXT + "text"
     }
 }
