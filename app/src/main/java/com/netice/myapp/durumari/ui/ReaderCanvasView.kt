@@ -678,6 +678,7 @@ class ReaderCanvasView @JvmOverloads constructor(
     companion object {
         private const val PAGE_NUMBER_RESERVED_DP = 34f
         private const val PAGE_BOTTOM_GUARD_DP = 2f
+        private const val PAGINATION_CHUNK_CHARS = 50_000
         private const val BOUNDARY_DURATION_MS = 180L
         private const val SLIDE_SHADOW_PX = 44f
         private const val BOOK_FOLD_SHADOW_BASE_PX = 34f
@@ -718,56 +719,85 @@ class ReaderCanvasView @JvmOverloads constructor(
             val paint = TextPaint(Paint.ANTI_ALIAS_FLAG)
             configureTextPaint(paint, settings, typeface, Color.BLACK, density)
 
-            progressCallback?.invoke(0.12f)
-            val layout = createStaticLayout(
-                text = normalized,
-                paint = paint,
-                width = contentWidth,
-                spacingMultiplier = effectiveLineSpacingMultiplier(paint, settings),
-            )
-            progressCallback?.invoke(0.28f)
             val pages = mutableListOf<PageSlice>()
-            var startLine = 0
             val pageHeightLimit = (contentHeight - PAGE_BOTTOM_GUARD_DP * density).coerceAtLeast(1f)
-            while (startLine < layout.lineCount) {
-                progressCallback?.invoke(0.28f + (startLine.toFloat() / layout.lineCount.coerceAtLeast(1)) * 0.70f)
-                val pageTop = layout.getLineTop(startLine)
-                var endLine = startLine
-                while (
-                    endLine < layout.lineCount &&
-                    layout.getLineBottom(endLine) - pageTop <= pageHeightLimit
-                ) {
-                    endLine += 1
-                }
-                if (endLine == startLine) endLine += 1
+            val spacingMul = effectiveLineSpacingMultiplier(paint, settings)
 
-                val start = layout.getLineStart(startLine).coerceIn(0, normalized.length)
-                while (endLine > startLine + 1) {
-                    val candidateEnd = trimmedEnd(
-                        text = normalized,
-                        start = start,
-                        end = layout.getLineEnd(endLine - 1).coerceIn(start, normalized.length),
-                    )
-                    if (fitsContentHeight(normalized, start, candidateEnd, paint, contentWidth, pageHeightLimit, settings)) break
-                    endLine -= 1
+            var textPos = 0
+            var globalLineCount = 0
+
+            while (textPos < normalized.length) {
+                progressCallback?.invoke(textPos.toFloat() / normalized.length.toFloat())
+
+                var chunkEnd = (textPos + PAGINATION_CHUNK_CHARS).coerceAtMost(normalized.length)
+                if (chunkEnd < normalized.length) {
+                    val nextNewline = normalized.indexOf('\n', chunkEnd)
+                    chunkEnd = if (nextNewline != -1) nextNewline + 1 else normalized.length
                 }
 
-                var end = layout.getLineEnd(endLine - 1).coerceIn(start, normalized.length)
-                if (end <= start) end = (start + 1).coerceAtMost(normalized.length)
-                pages.add(
-                    PageSlice(
-                        text = "",
-                        startOffset = start,
-                        endOffset = end,
-                        startLine = startLine,
-                        endLine = endLine,
-                    ),
+                val layout = createStaticLayout(
+                    text = normalized,
+                    start = textPos,
+                    end = chunkEnd,
+                    paint = paint,
+                    width = contentWidth,
+                    spacingMultiplier = spacingMul,
                 )
-                startLine = endLine
+
+                if (layout.lineCount == 0) break
+                val lineStartBase = layout.getLineStart(0)
+                val offsetAdjust = textPos - lineStartBase
+
+                var startLine = 0
+                while (startLine < layout.lineCount) {
+                    val pageTop = layout.getLineTop(startLine)
+                    var endLine = startLine
+                    while (
+                        endLine < layout.lineCount &&
+                        layout.getLineBottom(endLine) - pageTop <= pageHeightLimit
+                    ) {
+                        endLine += 1
+                    }
+                    if (endLine == startLine) endLine += 1
+
+                    if (endLine == layout.lineCount && chunkEnd < normalized.length && startLine > 0) {
+                        textPos = (offsetAdjust + layout.getLineStart(startLine)).coerceIn(0, normalized.length)
+                        break
+                    }
+
+                    val start = (offsetAdjust + layout.getLineStart(startLine)).coerceIn(0, normalized.length)
+                    while (endLine > startLine + 1) {
+                        val candidateEnd = trimmedEnd(
+                            text = normalized,
+                            start = start,
+                            end = (offsetAdjust + layout.getLineEnd(endLine - 1)).coerceIn(start, normalized.length),
+                        )
+                        if (fitsContentHeight(normalized, start, candidateEnd, paint, contentWidth, pageHeightLimit, settings)) break
+                        endLine -= 1
+                    }
+
+                    var end = (offsetAdjust + layout.getLineEnd(endLine - 1)).coerceIn(start, normalized.length)
+                    if (end <= start) end = (start + 1).coerceAtMost(normalized.length)
+
+                    val linesInPage = endLine - startLine
+                    pages.add(
+                        PageSlice(
+                            text = "",
+                            startOffset = start,
+                            endOffset = end,
+                            startLine = globalLineCount,
+                            endLine = globalLineCount + linesInPage,
+                        ),
+                    )
+
+                    globalLineCount += linesInPage
+                    startLine = endLine
+                    textPos = end
+                }
             }
             progressCallback?.invoke(1f)
             return pages.ifEmpty {
-                listOf(PageSlice(normalized, 0, normalized.length, startLine = 0, endLine = layout.lineCount))
+                listOf(PageSlice(normalized, 0, normalized.length, startLine = 0, endLine = globalLineCount))
             }
         }
 

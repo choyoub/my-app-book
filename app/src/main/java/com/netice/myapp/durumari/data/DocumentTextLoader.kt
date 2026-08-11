@@ -236,8 +236,8 @@ class DocumentTextLoader(private val contentResolver: ContentResolver) {
     )
 
     private companion object {
-        private const val RAW_LIMIT_BYTES = 100 * 1024 * 1024
-        private const val INFLATED_LIMIT_BYTES = 500 * 1024 * 1024
+        private const val RAW_LIMIT_BYTES = 20 * 1024 * 1024
+        private const val INFLATED_LIMIT_BYTES = 50 * 1024 * 1024
         private const val ZIP_ENTRY_LIMIT = 2_000
         private val SCRIPT_TAG_REGEX = Regex("(?is)<script.*?</script>")
         private val STYLE_TAG_REGEX = Regex("(?is)<style.*?</style>")
