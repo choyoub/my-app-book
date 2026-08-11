@@ -243,17 +243,11 @@ class MainActivity : Activity() {
         if (level >= ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN) {
             readerTypefaceCache.clear()
         }
-        if (level >= 15 /* ComponentCallbacks2.TRIM_MEMORY_MODERATE */) {
-            activeDocumentText = null
-            activePages = emptyList()
-        }
     }
 
     override fun onLowMemory() {
         super.onLowMemory()
         readerTypefaceCache.clear()
-        activeDocumentText = null
-        activePages = emptyList()
     }
 
     @Deprecated("Deprecated Android callback is sufficient for this simple native Activity.")
