@@ -41,6 +41,8 @@ class DurumariRootLayer @JvmOverloads constructor(
 
     var onInsetsChanged: ((top: Int, bottom: Int) -> Unit)? = null
     var onUserDismissOverlay: (() -> Unit)? = null
+    var onOverlayShown: (() -> Unit)? = null
+    var onOverlayDismissed: (() -> Unit)? = null
 
     val contentFrameWidthPx: Int
         get() = contentFrameWidth
@@ -85,11 +87,13 @@ class DurumariRootLayer @JvmOverloads constructor(
     }
 
     fun dismissOverlay() {
+        val wasVisible = overlayLayer.visibility == VISIBLE
         overlayMode = null
         overlayPanel = null
         overlayLayer.removeAllViews()
         overlayLayer.visibility = GONE
         overlayLayer.isClickable = false
+        if (wasVisible) onOverlayDismissed?.invoke()
     }
 
     fun showFramedOverlay(content: View) {
@@ -185,6 +189,7 @@ class DurumariRootLayer @JvmOverloads constructor(
                 LayoutParams(match, match),
             )
         }
+        val wasHidden = overlayLayer.visibility != VISIBLE
         overlayMode = mode
         overlayPanel = content
         overlayLayer.visibility = VISIBLE
@@ -193,6 +198,7 @@ class DurumariRootLayer @JvmOverloads constructor(
         disableDefaultSoundEffects(content)
         overlayLayer.addView(content)
         positionOverlayPanel()
+        if (wasHidden) onOverlayShown?.invoke()
     }
 
     private fun dismissOverlayFromUser() {

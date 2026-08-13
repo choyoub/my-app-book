@@ -21,6 +21,8 @@ import android.text.StaticLayout
 import android.text.TextPaint
 import android.util.AttributeSet
 import android.view.View
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputConnection
 import com.netice.myapp.durumari.model.PageTurnStyle
 import com.netice.myapp.durumari.model.ReaderSettings
 import kotlin.math.PI
@@ -71,6 +73,10 @@ class ReaderCanvasView @JvmOverloads constructor(
 
     val isPageAnimating: Boolean
         get() = pageTurnAnimator?.isRunning == true || boundaryAnimator?.isRunning == true
+
+    override fun onCheckIsTextEditor(): Boolean = false
+
+    override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? = null
 
     private val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG)
     private val pageNumberPaint = TextPaint(Paint.ANTI_ALIAS_FLAG)

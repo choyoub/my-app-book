@@ -33,6 +33,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowManager
+import android.view.inputmethod.InputMethodManager
 import android.view.animation.AccelerateDecelerateInterpolator
 import android.window.OnBackInvokedCallback
 import android.window.OnBackInvokedDispatcher
@@ -284,6 +285,20 @@ class MainActivity : Activity() {
     override fun onPause() {
         saveViewerResumeIfNeeded()
         super.onPause()
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        if (shouldSuppressViewerIme()) {
+            suppressViewerSoftInput()
+        }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && shouldSuppressViewerIme()) {
+            suppressViewerSoftInput()
+        }
     }
 
     private fun registerBackInvokedCallback() {
@@ -600,6 +615,7 @@ class MainActivity : Activity() {
         rootLayer = DurumariRootLayer(this).apply {
             applyTheme(theme)
             onUserDismissOverlay = { playUiFeedback(UiFeedbackKind.CLOSE) }
+            bindViewerImeOverlayPolicy()
             onInsetsChanged = { top, bottom ->
                 safeTopInset = top
                 safeBottomInset = bottom
@@ -648,9 +664,11 @@ class MainActivity : Activity() {
         val theme = DurumariThemes.tokens(settings.theme)
         configureSystemBars(theme)
 
+        restoreInteractiveSoftInput()
         rootLayer = DurumariRootLayer(this).apply {
             applyTheme(theme)
             onUserDismissOverlay = { playUiFeedback(UiFeedbackKind.CLOSE) }
+            bindViewerImeOverlayPolicy()
             onInsetsChanged = { top, bottom ->
                 safeTopInset = top
                 safeBottomInset = bottom
@@ -1723,6 +1741,7 @@ class MainActivity : Activity() {
         mainScreenVisible = false
         handler.removeCallbacksAndMessages(null)
         stopScrollAnimation()
+        hideSoftKeyboard()
         activeReaderCanvas = null
         configureSystemBars(theme)
         rootLayer?.applyTheme(theme)
@@ -1903,8 +1922,8 @@ class MainActivity : Activity() {
             pageText = pageTextForPage(activePageIndex)
             pageNumberText = "${activePageIndex + 1} / ${activePages.size.coerceAtLeast(1)}"
             bookmarkActive = isBookmarkActiveForPage(activePageIndex)
-            isFocusable = false
-            isFocusableInTouchMode = false
+            isFocusable = true
+            isFocusableInTouchMode = true
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 defaultFocusHighlightEnabled = false
             }
@@ -1912,6 +1931,12 @@ class MainActivity : Activity() {
         attachViewerGestures(canvas, theme)
         activeReaderCanvas = canvas
         rootLayer?.setScreenContent(canvas)
+        suppressViewerSoftInput()
+        canvas.post {
+            if (activeReaderCanvas === canvas && shouldSuppressViewerIme()) {
+                suppressViewerSoftInput()
+            }
+        }
         verifyViewerPaginationFrame(canvas)
     }
 
@@ -3535,6 +3560,41 @@ class MainActivity : Activity() {
         } else {
             window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
+    }
+
+    private fun isViewerReading(): Boolean {
+        return activeDocument != null && activePages.isNotEmpty()
+    }
+
+    private fun shouldSuppressViewerIme(): Boolean {
+        return isViewerReading() && rootLayer?.isOverlayVisible != true
+    }
+
+    private fun DurumariRootLayer.bindViewerImeOverlayPolicy() {
+        onOverlayShown = {
+            if (isViewerReading()) restoreInteractiveSoftInput()
+        }
+        onOverlayDismissed = {
+            if (isViewerReading()) suppressViewerSoftInput()
+        }
+    }
+
+    private fun suppressViewerSoftInput() {
+        hideSoftKeyboard()
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN)
+        if (rootLayer?.isOverlayVisible != true) {
+            activeReaderCanvas?.requestFocus()
+        }
+    }
+
+    private fun restoreInteractiveSoftInput() {
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_HIDDEN)
+    }
+
+    private fun hideSoftKeyboard() {
+        val view = currentFocus ?: window.decorView
+        getSystemService(InputMethodManager::class.java)
+            ?.hideSoftInputFromWindow(view.windowToken, 0)
     }
 
     private fun createThemeFilterSection(
