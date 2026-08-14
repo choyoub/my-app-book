@@ -31,6 +31,7 @@ import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowManager
@@ -82,6 +83,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
+import kotlin.math.max
 import kotlin.math.roundToInt
 
 class MainActivity : Activity() {
@@ -171,6 +173,14 @@ class MainActivity : Activity() {
     private var mainSwipeCurrentView: View? = null
     private var searchQuery: String = ""
     private var lastWheelTurnAt: Long = 0L
+    private var queuedPageTurnDelta: Int = 0
+    private var queuedPageTurnAxis: ReaderCanvasView.TurnAxis? = null
+    private var lastBoundaryToastEdge: Int? = null
+    private var viewerFrameWatcher: View.OnLayoutChangeListener? = null
+    private var remasuringWidthPx: Int = 0
+    private var remasuringHeightPx: Int = 0
+    private val touchSlopPx by lazy { ViewConfiguration.get(this).scaledTouchSlop.toFloat() }
+    private val swipeConfirmPx by lazy { max(touchSlopPx * 2.5f, dp(28).toFloat()) }
     private var backInvokedCallback: OnBackInvokedCallback? = null
     private val dateFormat = SimpleDateFormat("yyyy.MM.dd", Locale.KOREA)
     private data class ReaderFontOption(val family: String, val label: String, val assetPath: String)
@@ -276,6 +286,7 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         activityDestroyed = true
         activityStarted = false
+        cancelPendingViewerWork()
         if (::remoteControlServer.isInitialized) remoteControlServer.stop()
         handler.removeCallbacksAndMessages(null)
         stopScrollAnimation()
@@ -294,6 +305,14 @@ class MainActivity : Activity() {
         super.onConfigurationChanged(newConfig)
         if (shouldSuppressViewerIme()) {
             suppressViewerSoftInput()
+        }
+        val canvas = activeReaderCanvas
+        if (canvas != null && canvas.width > 0 && canvas.height > 0) {
+            canvas.post {
+                if (activeReaderCanvas !== canvas || activityDestroyed) return@post
+                pendingViewerAnchorOffset = pendingViewerAnchorOffset ?: currentViewerAnchorOffset()
+                repaginateForMeasuredCanvasIfNeeded(canvas, canvas.width, canvas.height)
+            }
         }
     }
 
@@ -408,7 +427,10 @@ class MainActivity : Activity() {
     }
 
     private fun closeViewerToMain() {
-        saveActiveReading(pendingViewerAnchorOffset)
+        cancelPendingViewerWork()
+        if (activePages.isNotEmpty()) {
+            saveActiveReading(pendingViewerAnchorOffset)
+        }
         clearViewerResume()
         rootLayer?.dismissOverlay()
         activeDocument = null
@@ -416,7 +438,23 @@ class MainActivity : Activity() {
         activePageIndex = 0
         activeDocumentText = null
         activeReaderCanvas = null
+        queuedPageTurnAxis = null
+        lastBoundaryToastEdge = null
         showMainScreen()
+    }
+
+    private fun cancelPendingViewerWork() {
+        paginationRequestId += 1
+        queuedPageTurnAxis = null
+        remasuringWidthPx = 0
+        remasuringHeightPx = 0
+        detachViewerFrameWatcher()
+    }
+
+    private fun detachViewerFrameWatcher() {
+        val watcher = viewerFrameWatcher ?: return
+        activeReaderCanvas?.removeOnLayoutChangeListener(watcher)
+        viewerFrameWatcher = null
     }
 
     private fun showIntroThenMain() {
@@ -625,10 +663,7 @@ class MainActivity : Activity() {
             }
         }
         setContentView(rootLayer)
-        applyViewerLoadResult(loaded)
-        syncBookmarksForActivePages()
-        reloadLibraryState()
-        showViewerPage(theme)
+        presentLoadedViewer(loaded, theme)
     }
 
     private fun contentFrameSizeForRoot(rootWidth: Int, rootHeight: Int): Pair<Int, Int>? {
@@ -1740,11 +1775,13 @@ class MainActivity : Activity() {
         targetPage: Int? = null,
         targetOffset: Int? = null,
         forceEncoding: String? = null,
+        paginateExistingText: Boolean = false,
     ) {
         mainScreenVisible = false
         handler.removeCallbacksAndMessages(null)
         stopScrollAnimation()
         hideSoftKeyboard()
+        detachViewerFrameWatcher()
         activeReaderCanvas = null
         configureSystemBars(theme)
         rootLayer?.applyTheme(theme)
@@ -1769,7 +1806,11 @@ class MainActivity : Activity() {
             progressTintList = ColorStateList.valueOf(theme.accent)
             progressBackgroundTintList = ColorStateList.valueOf(theme.border)
         }
-        val initialLoadingStatus = if (forceEncoding != null) VIEWER_STATUS_REENCODING else VIEWER_STATUS_TEXT_LOADING
+        val initialLoadingStatus = when {
+            forceEncoding != null -> VIEWER_STATUS_REENCODING
+            paginateExistingText -> VIEWER_STATUS_PAGINATION
+            else -> VIEWER_STATUS_TEXT_LOADING
+        }
         val loadingStatus = text(
             viewerStatusWithProgress(initialLoadingStatus, progress.progress),
             theme.secondary,
@@ -1816,39 +1857,110 @@ class MainActivity : Activity() {
         activeDocument = document
         updateKeepScreenOn(viewerActive = true)
         markViewerResume(document.documentId)
+        val existingText = if (paginateExistingText) activeDocumentText else null
         Thread {
             runCatching {
-                loadViewerDocumentForDisplay(
-                    document = document,
-                    targetPage = targetPage,
-                    targetOffset = targetOffset,
-                    forceEncoding = forceEncoding,
-                    progressCallback = { value -> reportLoadingProgress(value, force = value <= 2 || value >= 99) },
-                )
+                if (existingText != null) {
+                    paginateExistingViewerText(
+                        document = document,
+                        displayText = existingText,
+                        targetPage = targetPage,
+                        targetOffset = targetOffset,
+                        progressCallback = { value -> reportLoadingProgress(value, force = value <= 2 || value >= 99) },
+                    )
+                } else {
+                    loadViewerDocumentForDisplay(
+                        document = document,
+                        targetPage = targetPage,
+                        targetOffset = targetOffset,
+                        forceEncoding = forceEncoding,
+                        progressCallback = { value -> reportLoadingProgress(value, force = value <= 2 || value >= 99) },
+                    )
+                }
             }.onSuccess { loaded ->
                 runOnUiThread {
-                    if (paginationRequestId != requestId) return@runOnUiThread
-                    applyViewerLoadResult(loaded)
+                    if (activityDestroyed || paginationRequestId != requestId) return@runOnUiThread
                     progress.progress = 100
                     loadingStatus.text = viewerStatusWithProgress(VIEWER_STATUS_PAGINATION, 100)
                     progress.contentDescription = loadingStatus.text
-                    syncBookmarksForActivePages()
-                    reloadLibraryState()
-                    showViewerPage(theme)
+                    presentLoadedViewer(loaded, theme)
                 }
             }.onFailure { error ->
                 runOnUiThread {
-                    if (paginationRequestId != requestId) return@runOnUiThread
-                    clearViewerResume()
-                    activeDocument = null
-                    activePages = emptyList()
-                    activePageIndex = 0
-                    activeDocumentText = null
+                    if (activityDestroyed || paginationRequestId != requestId) return@runOnUiThread
                     Toast.makeText(this, error.message ?: "문서를 열 수 없습니다.", Toast.LENGTH_LONG).show()
-                    showMainScreen()
+                    if (paginateExistingText && existingText != null && activePages.isNotEmpty()) {
+                        showViewerPage(theme)
+                    } else {
+                        clearViewerResume()
+                        activeDocument = null
+                        activePages = emptyList()
+                        activePageIndex = 0
+                        activeDocumentText = null
+                        showMainScreen()
+                    }
                 }
             }
-        }.start()
+        }.apply {
+            name = "DurumariViewerLoad"
+            start()
+        }
+    }
+
+    private fun presentLoadedViewer(loaded: ViewerLoadResult, theme: ThemeTokens) {
+        applyViewerLoadResult(loaded)
+        showViewerPage(theme)
+        val canvas = activeReaderCanvas
+        canvas?.post {
+            if (activityDestroyed || activeReaderCanvas !== canvas) return@post
+            syncBookmarksForActivePages()
+            reloadLibraryState()
+            if (activeReaderCanvas === canvas) {
+                canvas.bookmarkActive = isBookmarkActiveForPage(activePageIndex)
+            }
+        }
+    }
+
+    private fun paginateExistingViewerText(
+        document: DocumentRecord,
+        displayText: String,
+        targetPage: Int? = null,
+        targetOffset: Int? = null,
+        readerSettings: ReaderSettings = settings,
+        typeface: Typeface = loadReaderTypeface(readerSettings),
+        progressCallback: ((Int) -> Unit)? = null,
+    ): ViewerLoadResult {
+        progressCallback?.invoke(32)
+        val pagination = paginateText(
+            text = displayText,
+            readerSettings = readerSettings,
+            typeface = typeface,
+            progressCallback = { ratio ->
+                progressCallback?.invoke((32 + ratio * 66f).roundToInt().coerceIn(32, 98))
+            },
+        )
+        progressCallback?.invoke(99)
+        val savedReading = readingsById[document.documentId]
+        val anchorOffset = when {
+            targetOffset != null -> targetOffset.coerceIn(0, displayText.length)
+            targetPage != null -> pagination.pages
+                .getOrNull((targetPage - 1).coerceIn(0, pagination.pages.size.coerceAtLeast(1) - 1))
+                ?.startOffset
+                ?: 0
+            savedReading != null -> anchorOffsetForReading(savedReading, pagination.pages, displayText)
+            else -> null
+        }
+        val startPageIndex = anchorOffset
+            ?.let { pageIndexForOffset(pagination.pages, it) }
+            ?: 0
+        return ViewerLoadResult(
+            document = document,
+            text = displayText,
+            pagination = pagination,
+            pageIndex = startPageIndex,
+            encoding = document.textEncoding ?: activeEncoding,
+            anchorOffset = anchorOffset,
+        )
     }
 
     private fun loadViewerDocumentForDisplay(
@@ -1912,25 +2024,26 @@ class MainActivity : Activity() {
     }
 
     private fun showViewerPage(theme: ThemeTokens) {
-        handler.removeCallbacksAndMessages(null)
         stopScrollAnimation()
         updateKeepScreenOn(viewerActive = true)
         if (pendingViewerAnchorOffset == null) {
             saveActiveReading()
         }
+        val existing = activeReaderCanvas
+        if (existing != null && existing.isAttachedToWindow) {
+            bindViewerCanvas(existing, theme)
+            suppressViewerSoftInput()
+            return
+        }
+        detachViewerFrameWatcher()
         val canvas = ReaderCanvasView(this).apply {
-            this.theme = theme
-            readerSettings = settings
-            readerTypeface = loadReaderTypeface(settings)
-            pageText = pageTextForPage(activePageIndex)
-            pageNumberText = "${activePageIndex + 1} / ${activePages.size.coerceAtLeast(1)}"
-            bookmarkActive = isBookmarkActiveForPage(activePageIndex)
             isFocusable = true
             isFocusableInTouchMode = true
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 defaultFocusHighlightEnabled = false
             }
         }
+        bindViewerCanvas(canvas, theme)
         attachViewerGestures(canvas, theme)
         activeReaderCanvas = canvas
         rootLayer?.setScreenContent(canvas)
@@ -1940,7 +2053,16 @@ class MainActivity : Activity() {
                 suppressViewerSoftInput()
             }
         }
-        verifyViewerPaginationFrame(canvas)
+        watchViewerPaginationFrame(canvas)
+    }
+
+    private fun bindViewerCanvas(canvas: ReaderCanvasView, theme: ThemeTokens) {
+        canvas.theme = theme
+        canvas.readerSettings = settings
+        canvas.readerTypeface = loadReaderTypeface(settings)
+        canvas.pageText = pageTextForPage(activePageIndex)
+        canvas.pageNumberText = "${activePageIndex + 1} / ${activePages.size.coerceAtLeast(1)}"
+        canvas.bookmarkActive = isBookmarkActiveForPage(activePageIndex)
     }
 
     private fun attachViewerGestures(canvas: ReaderCanvasView, theme: ThemeTokens) {
@@ -1970,12 +2092,12 @@ class MainActivity : Activity() {
                             view.parent?.requestDisallowInterceptTouchEvent(false)
                             showViewerMenuSheet(theme)
                         }
-                    }.also { handler.postDelayed(it, 560L) }
+                    }.also { handler.postDelayed(it, 480L) }
                     view.parent?.requestDisallowInterceptTouchEvent(true)
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    if (abs(event.x - downX) > SWIPE_CANCEL_PX || abs(event.y - downY) > SWIPE_CANCEL_PX) {
+                    if (abs(event.x - downX) > touchSlopPx || abs(event.y - downY) > touchSlopPx) {
                         moved = true
                         clearLongPressState(view)
                     }
@@ -1992,10 +2114,12 @@ class MainActivity : Activity() {
                     val horizontal = abs(dx) > abs(dy)
                     val axisDistance = if (horizontal) abs(dx) else abs(dy)
                     val axisLength = if (horizontal) view.width else view.height
-                    val swipeConfirmed = axisDistance >= SWIPE_CONFIRM_PX ||
-                        axisDistance >= axisLength.coerceAtLeast(1) * SWIPE_CONFIRM_RATIO
+                    val swipeConfirmed = settings.pageTurnSwipe && (
+                        axisDistance >= swipeConfirmPx ||
+                            axisDistance >= axisLength.coerceAtLeast(1) * SWIPE_CONFIRM_RATIO
+                        )
                     when {
-                        settings.pageTurnSwipe && swipeConfirmed -> {
+                        swipeConfirmed -> {
                             val delta = if (horizontal) {
                                 if (dx < 0) 1 else -1
                             } else {
@@ -2004,7 +2128,7 @@ class MainActivity : Activity() {
                             val axis = if (horizontal) ReaderCanvasView.TurnAxis.HORIZONTAL else ReaderCanvasView.TurnAxis.VERTICAL
                             turnViewerPage(delta, theme, view, axis)
                         }
-                        settings.pageTurnTouch && !moved -> {
+                        settings.pageTurnTouch && (!moved || !settings.pageTurnSwipe) -> {
                             val nx = event.x / view.width.coerceAtLeast(1).toFloat() - 0.5f
                             val ny = event.y / view.height.coerceAtLeast(1).toFloat() - 0.5f
                             val delta = if (abs(nx) >= abs(ny)) {
@@ -2034,25 +2158,41 @@ class MainActivity : Activity() {
         feedbackView: View? = null,
         axis: ReaderCanvasView.TurnAxis = ReaderCanvasView.TurnAxis.HORIZONTAL,
     ): Boolean {
-        if ((feedbackView as? ReaderCanvasView)?.isPageAnimating == true) return false
+        val canvas = feedbackView as? ReaderCanvasView
+        if (canvas?.isPageAnimating == true) {
+            queuedPageTurnDelta = delta
+            queuedPageTurnAxis = axis
+            return false
+        }
         val total = activePages.size.coerceAtLeast(1)
         val next = (activePageIndex + delta).coerceIn(0, total - 1)
         if (next == activePageIndex) {
+            queuedPageTurnAxis = null
             if (delta != 0) {
                 playPageTurnFeedback(feedbackView, previous = delta < 0)
-                (feedbackView as? ReaderCanvasView)?.startBoundaryBounce(delta, axis)
-                Toast.makeText(
-                    this,
-                    if (delta < 0) "첫 페이지입니다" else "마지막 페이지입니다",
-                    Toast.LENGTH_SHORT,
-                ).show()
+                canvas?.startBoundaryBounce(delta, axis)
+                val edge = if (delta < 0) -1 else 1
+                if (lastBoundaryToastEdge != edge) {
+                    lastBoundaryToastEdge = edge
+                    Toast.makeText(
+                        this,
+                        if (delta < 0) "첫 페이지입니다" else "마지막 페이지입니다",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                }
             }
             return false
         }
-        val canvas = feedbackView as? ReaderCanvasView
+        lastBoundaryToastEdge = null
+        queuedPageTurnAxis = null
         pendingViewerAnchorOffset = null
         activePageIndex = next
         playPageTurnFeedback(feedbackView, previous = delta < 0)
+        val turnStyle = if (axis == ReaderCanvasView.TurnAxis.VERTICAL && settings.pageTurnStyle == PageTurnStyle.CURL) {
+            PageTurnStyle.SLIDE
+        } else {
+            settings.pageTurnStyle
+        }
         if (canvas != null) {
             canvas.startPageTransition(
                 toText = pageTextForPage(activePageIndex),
@@ -2060,9 +2200,15 @@ class MainActivity : Activity() {
                 toBookmarkActive = isBookmarkActiveForPage(activePageIndex),
                 previous = delta < 0,
                 axis = axis,
-                style = settings.pageTurnStyle,
+                style = turnStyle,
             ) {
                 saveActiveReading()
+                val queuedAxis = queuedPageTurnAxis
+                if (queuedAxis != null) {
+                    val queuedDelta = queuedPageTurnDelta
+                    queuedPageTurnAxis = null
+                    turnViewerPage(queuedDelta, theme, canvas, queuedAxis)
+                }
             }
         } else {
             showViewerPage(theme)
@@ -2183,16 +2329,7 @@ class MainActivity : Activity() {
             setUiClickListener(UiFeedbackKind.OPEN) { showSettingsOverlay() }
         }, LinearLayout.LayoutParams(0, dp(78), 1f).apply { leftMargin = dp(10) })
         secondRow.addView(createViewerAction(theme, "📚", "목록").apply {
-            setUiClickListener(UiFeedbackKind.CLOSE) {
-                saveActiveReading()
-                clearViewerResume()
-                rootLayer?.dismissOverlay()
-                activeDocument = null
-                activePages = emptyList()
-                activePageIndex = 0
-                activeDocumentText = null
-                showMainScreen()
-            }
+            setUiClickListener(UiFeedbackKind.CLOSE) { closeViewerToMain() }
         }, LinearLayout.LayoutParams(0, dp(78), 1f).apply { leftMargin = dp(10) })
         grid.addView(firstRow, linear(match, wrap))
         grid.addView(secondRow, linear(match, wrap, top = 10))
@@ -2431,23 +2568,21 @@ class MainActivity : Activity() {
         activePaginationHeightPx = pagination.heightPx
     }
 
-    private fun verifyViewerPaginationFrame(canvas: ReaderCanvasView) {
-        var checked = false
-        lateinit var listener: View.OnLayoutChangeListener
-
-        fun check(view: View, widthPx: Int, heightPx: Int) {
-            if (checked || widthPx <= 0 || heightPx <= 0) return
-            checked = true
-            view.removeOnLayoutChangeListener(listener)
+    private fun watchViewerPaginationFrame(canvas: ReaderCanvasView) {
+        detachViewerFrameWatcher()
+        val listener = View.OnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
+            val widthPx = right - left
+            val heightPx = bottom - top
+            if (widthPx <= 0 || heightPx <= 0) return@OnLayoutChangeListener
+            if (widthPx == oldRight - oldLeft && heightPx == oldBottom - oldTop) return@OnLayoutChangeListener
+            pendingViewerAnchorOffset = pendingViewerAnchorOffset ?: currentViewerAnchorOffset()
             repaginateForMeasuredCanvasIfNeeded(canvas, widthPx, heightPx)
         }
-
-        listener = View.OnLayoutChangeListener { view, left, top, right, bottom, _, _, _, _ ->
-            check(view, right - left, bottom - top)
-        }
+        viewerFrameWatcher = listener
         canvas.addOnLayoutChangeListener(listener)
         canvas.post {
-            check(canvas, canvas.width, canvas.height)
+            if (activeReaderCanvas !== canvas || canvas.width <= 0 || canvas.height <= 0) return@post
+            repaginateForMeasuredCanvasIfNeeded(canvas, canvas.width, canvas.height)
         }
     }
 
@@ -2457,12 +2592,15 @@ class MainActivity : Activity() {
         heightPx: Int,
     ) {
         val text = activeDocumentText ?: return
-        if (activePages.isEmpty()) return
+        if (activePages.isEmpty() || widthPx <= 0 || heightPx <= 0) return
         val pendingAnchor = pendingViewerAnchorOffset
         val needsPagination = activePaginationWidthPx != widthPx || activePaginationHeightPx != heightPx
         if (!needsPagination && pendingAnchor == null) return
 
         if (needsPagination) {
+            if (remasuringWidthPx == widthPx && remasuringHeightPx == heightPx) return
+            remasuringWidthPx = widthPx
+            remasuringHeightPx = heightPx
             val requestId = ++paginationRequestId
             val documentId = activeDocument?.documentId
             val settingsSnapshot = settings
@@ -2480,7 +2618,6 @@ class MainActivity : Activity() {
                     )
                 }
                 runOnUiThread {
-                    val pagination = result.getOrNull() ?: return@runOnUiThread
                     if (
                         activityDestroyed ||
                         paginationRequestId != requestId ||
@@ -2489,6 +2626,13 @@ class MainActivity : Activity() {
                         activeDocumentText !== text ||
                         settings != settingsSnapshot
                     ) {
+                        return@runOnUiThread
+                    }
+                    val pagination = result.getOrNull()
+                    if (pagination == null) {
+                        remasuringWidthPx = 0
+                        remasuringHeightPx = 0
+                        Toast.makeText(this, "페이지를 다시 계산하지 못했습니다.", Toast.LENGTH_SHORT).show()
                         return@runOnUiThread
                     }
                     val targetOffset = pendingViewerAnchorOffset ?: anchorOffsetForPage(activePageIndex)
@@ -2894,19 +3038,22 @@ class MainActivity : Activity() {
                 if (viewerWasOpen) {
                     val theme = DurumariThemes.tokens(settings.theme)
                     val needsPagination = activeDocumentText != null && paginationSettingsChanged(previous, settings)
-                    if (needsPagination) {
-                        val pagination = paginateText(activeDocumentText.orEmpty())
-                        applyPaginationResult(pagination)
-                        val resolvedTargetOffset = targetOffset ?: currentViewerAnchorOffset()
-                        activePageIndex = pageIndexForOffset(activePages, resolvedTargetOffset)
-                        pendingViewerAnchorOffset = resolvedTargetOffset
-                        syncBookmarksForActivePages()
-                    }
-                    val needsRedraw = needsPagination || previous.theme != settings.theme
-                    if (needsRedraw) {
+                    val document = activeDocument
+                    if (needsPagination && document != null) {
+                        configureSystemBars(theme)
+                        rootLayer?.applyTheme(theme)
+                        showViewerLoadingThenPage(
+                            theme = theme,
+                            document = document,
+                            targetOffset = targetOffset ?: currentViewerAnchorOffset(),
+                            paginateExistingText = true,
+                        )
+                    } else if (previous.theme != settings.theme) {
                         configureSystemBars(theme)
                         rootLayer?.applyTheme(theme)
                         showViewerPage(theme)
+                    } else {
+                        activeReaderCanvas?.let { bindViewerCanvas(it, theme) }
                     }
                 } else {
                     if (previous.theme != settings.theme || previous.hideCompleted != settings.hideCompleted) {
@@ -4477,8 +4624,6 @@ class MainActivity : Activity() {
         private const val SCROLL_ANIMATION_ACTIVE_MS = 1600L
         private const val INTRO_ANIMATION_TOTAL_MS = SCROLL_ANIMATION_START_DELAY_MS + SCROLL_ANIMATION_ACTIVE_MS
         private const val VIEWER_CONTENT_MAX_ASPECT = 2f / 3f
-        private const val SWIPE_CANCEL_PX = 8f
-        private const val SWIPE_CONFIRM_PX = 52f
         private const val SWIPE_CONFIRM_RATIO = 0.20f
         private const val WHEEL_TURN_THROTTLE_MS = 300L
         private const val PREVIEW_PAGE_NUMBER_RESERVED_DP = 34

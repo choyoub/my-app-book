@@ -96,6 +96,8 @@ class ReaderCanvasView @JvmOverloads constructor(
     private var boundaryOffsetX: Float = 0f
     private var boundaryOffsetY: Float = 0f
     private var transition: PageTransition? = null
+    private var reusableFromSurface: Bitmap? = null
+    private var reusableToSurface: Bitmap? = null
 
     data class PageSlice(
         val text: String,
@@ -195,8 +197,8 @@ class ReaderCanvasView @JvmOverloads constructor(
             previous = previous,
             axis = axis,
             style = style,
-            fromSurface = createPageSurface(pageText, pageNumberText, bookmarkActive),
-            toSurface = createPageSurface(toText, toNumberText, toBookmarkActive),
+            fromSurface = createPageSurface(pageText, pageNumberText, bookmarkActive, slot = 0),
+            toSurface = createPageSurface(toText, toNumberText, toBookmarkActive, slot = 1),
         )
         pageTurnAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
             duration = if (style == PageTurnStyle.CURL) 380L else 220L
@@ -263,6 +265,7 @@ class ReaderCanvasView @JvmOverloads constructor(
         clearPageLayoutCache()
         recycleTransitionSurfaces()
         transition = null
+        recycleReusableSurfaces()
         super.onDetachedFromWindow()
     }
 
@@ -270,6 +273,7 @@ class ReaderCanvasView @JvmOverloads constructor(
         super.onSizeChanged(width, height, oldWidth, oldHeight)
         if (width != oldWidth || height != oldHeight) {
             clearPageLayoutCache()
+            recycleReusableSurfaces()
         }
     }
 
@@ -361,10 +365,15 @@ class ReaderCanvasView @JvmOverloads constructor(
         }
     }
 
-    private fun createPageSurface(text: String, numberText: String, showBookmark: Boolean): Bitmap? {
+    private fun createPageSurface(
+        text: String,
+        numberText: String,
+        showBookmark: Boolean,
+        slot: Int,
+    ): Bitmap? {
         if (width <= 0 || height <= 0) return null
         return try {
-            Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { bitmap ->
+            obtainReusableSurface(slot)?.also { bitmap ->
                 drawPageSurface(Canvas(bitmap), text, numberText, showBookmark)
             }
         } catch (_: OutOfMemoryError) {
@@ -374,12 +383,28 @@ class ReaderCanvasView @JvmOverloads constructor(
         }
     }
 
+    private fun obtainReusableSurface(slot: Int): Bitmap? {
+        val current = if (slot == 0) reusableFromSurface else reusableToSurface
+        if (current != null && !current.isRecycled && current.width == width && current.height == height) {
+            return current
+        }
+        current?.takeUnless { it.isRecycled }?.recycle()
+        val created = Bitmap.createBitmap(width, height, Bitmap.Config.RGB_565)
+        if (slot == 0) reusableFromSurface = created else reusableToSurface = created
+        return created
+    }
+
     private fun recycleTransitionSurfaces() {
-        val current = transition ?: return
-        current.fromSurface?.takeUnless { it.isRecycled }?.recycle()
-        current.toSurface
-            ?.takeUnless { it === current.fromSurface || it.isRecycled }
+        // Reusable snapshots stay allocated until detach or resize.
+    }
+
+    private fun recycleReusableSurfaces() {
+        reusableFromSurface?.takeUnless { it.isRecycled }?.recycle()
+        reusableToSurface
+            ?.takeUnless { it === reusableFromSurface || it.isRecycled }
             ?.recycle()
+        reusableFromSurface = null
+        reusableToSurface = null
     }
 
     private fun drawPageLayer(
@@ -685,13 +710,14 @@ class ReaderCanvasView @JvmOverloads constructor(
         private const val PAGE_NUMBER_RESERVED_DP = 34f
         private const val PAGE_BOTTOM_GUARD_DP = 2f
         private const val PAGINATION_CHUNK_CHARS = 50_000
+        private const val PAGINATION_CHUNK_NEWLINE_SLACK = 8_192
         private const val BOUNDARY_DURATION_MS = 180L
         private const val SLIDE_SHADOW_PX = 44f
         private const val BOOK_FOLD_SHADOW_BASE_PX = 34f
         private const val BOOK_FOLD_SHADOW_EXTRA_PX = 70f
         private const val BOOK_SPINE_SHADOW_PX = 54f
         private const val BOOK_STRIP_MIN_PX = 8f
-        private const val BOOK_STRIP_COUNT = 56f
+        private const val BOOK_STRIP_COUNT = 36f
         private const val TEXT_LAYOUT_CACHE_SIZE = 3
         private val PAGE_TURN_INTERPOLATOR = TimeInterpolator { input ->
             if (input < 0.5f) {
@@ -737,8 +763,11 @@ class ReaderCanvasView @JvmOverloads constructor(
 
                 var chunkEnd = (textPos + PAGINATION_CHUNK_CHARS).coerceAtMost(normalized.length)
                 if (chunkEnd < normalized.length) {
+                    val searchLimit = (chunkEnd + PAGINATION_CHUNK_NEWLINE_SLACK).coerceAtMost(normalized.length)
                     val nextNewline = normalized.indexOf('\n', chunkEnd)
-                    chunkEnd = if (nextNewline != -1) nextNewline + 1 else normalized.length
+                    if (nextNewline in chunkEnd until searchLimit) {
+                        chunkEnd = nextNewline + 1
+                    }
                 }
 
                 val layout = createStaticLayout(
