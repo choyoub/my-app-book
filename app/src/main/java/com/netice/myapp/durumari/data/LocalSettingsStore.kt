@@ -30,6 +30,7 @@ class LocalSettingsStore(context: Context) {
             pageTurnFeedback = prefs.enumValue(KEY_PAGE_TURN_FEEDBACK, defaults.pageTurnFeedback),
             pageTurnStyle = prefs.enumValue(KEY_PAGE_TURN_STYLE, defaults.pageTurnStyle),
             keepScreenOnInViewer = prefs.getBoolean(KEY_KEEP_SCREEN_ON_IN_VIEWER, defaults.keepScreenOnInViewer),
+            screenOrientation = prefs.enumValue(KEY_SCREEN_ORIENTATION, defaults.screenOrientation),
             remoteControlEnabled = prefs.getBoolean(KEY_REMOTE_CONTROL_ENABLED, defaults.remoteControlEnabled),
             remoteUseDefaultPort = prefs.getBoolean(KEY_REMOTE_USE_DEFAULT_PORT, defaults.remoteUseDefaultPort),
             remoteControlPort = prefs.getInt(KEY_REMOTE_CONTROL_PORT, defaults.remoteControlPort),
@@ -61,6 +62,7 @@ class LocalSettingsStore(context: Context) {
             .putString(KEY_PAGE_TURN_FEEDBACK, settings.pageTurnFeedback.name)
             .putString(KEY_PAGE_TURN_STYLE, settings.pageTurnStyle.name)
             .putBoolean(KEY_KEEP_SCREEN_ON_IN_VIEWER, settings.keepScreenOnInViewer)
+            .putString(KEY_SCREEN_ORIENTATION, settings.screenOrientation.name)
             .putBoolean(KEY_REMOTE_CONTROL_ENABLED, settings.remoteControlEnabled)
             .putBoolean(KEY_REMOTE_USE_DEFAULT_PORT, settings.remoteUseDefaultPort)
             .putInt(KEY_REMOTE_CONTROL_PORT, settings.remoteControlPort)
@@ -135,6 +137,7 @@ class LocalSettingsStore(context: Context) {
         private const val KEY_PAGE_TURN_FEEDBACK = "pageTurnFeedback"
         private const val KEY_PAGE_TURN_STYLE = "pageTurnStyle"
         private const val KEY_KEEP_SCREEN_ON_IN_VIEWER = "keepScreenOnInViewer"
+        private const val KEY_SCREEN_ORIENTATION = "screenOrientation"
         private const val KEY_REMOTE_CONTROL_ENABLED = "remoteControl.enabled"
         private const val KEY_REMOTE_USE_DEFAULT_PORT = "remoteControl.useDefaultPort"
         private const val KEY_REMOTE_CONTROL_PORT = "remoteControl.port"

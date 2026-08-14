@@ -6,6 +6,7 @@ import android.animation.AnimatorListenerAdapter
 import android.app.Activity
 import android.content.ComponentCallbacks2
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.graphics.Canvas
@@ -63,6 +64,7 @@ import com.netice.myapp.durumari.model.FolderRecord
 import com.netice.myapp.durumari.model.PageTurnFeedback
 import com.netice.myapp.durumari.model.PageTurnStyle
 import com.netice.myapp.durumari.model.ReaderSettings
+import com.netice.myapp.durumari.model.ScreenOrientationMode
 import com.netice.myapp.durumari.model.ReadingRecord
 import com.netice.myapp.durumari.model.SortConfig
 import com.netice.myapp.durumari.model.SortDirection
@@ -202,6 +204,7 @@ class MainActivity : Activity() {
         appTypeface = loadTypeface()
         settingsStore = LocalSettingsStore(this)
         settings = normalizeReaderSettings(settingsStore.load())
+        applyScreenOrientation()
         remoteControlServer = RemoteControlServer(
             onCommand = ::handleRemoteCommand,
             onStateChanged = { state, detail ->
@@ -2883,6 +2886,7 @@ class MainActivity : Activity() {
                 }
                 settings = normalizeReaderSettings(draftSettings)
                 settingsStore.save(settings)
+                applyScreenOrientation()
                 applyRemoteControlSettings(previous)
                 updateKeepScreenOn(viewerActive = viewerWasOpen)
                 pruneReaderTypefaceCache(settings)
@@ -3432,6 +3436,20 @@ class MainActivity : Activity() {
         section.addView(createToggleRow(theme, "💡 뷰 모드 화면 켜짐 유지", draftSettings.keepScreenOnInViewer) {
             onSettingsChanged(draftSettings.copy(keepScreenOnInViewer = !draftSettings.keepScreenOnInViewer))
         }, linear(match, wrap, top = SETTINGS_CONTROL_GAP_DP))
+        val orientationValues = listOf("🔄 자동", "📱 세로", "↔️ 가로")
+        val orientationIndex = when (draftSettings.screenOrientation) {
+            ScreenOrientationMode.AUTO -> 0
+            ScreenOrientationMode.PORTRAIT -> 1
+            ScreenOrientationMode.LANDSCAPE -> 2
+        }
+        section.addView(createSegmentField(theme, "화면 방향", orientationValues, orientationIndex) { index ->
+            val selected = when (index) {
+                1 -> ScreenOrientationMode.PORTRAIT
+                2 -> ScreenOrientationMode.LANDSCAPE
+                else -> ScreenOrientationMode.AUTO
+            }
+            onSettingsChanged(draftSettings.copy(screenOrientation = selected))
+        }, linear(match, wrap, top = SETTINGS_CONTROL_GAP_DP))
         return section
     }
 
@@ -3559,6 +3577,14 @@ class MainActivity : Activity() {
             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         } else {
             window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+
+    private fun applyScreenOrientation() {
+        requestedOrientation = when (settings.screenOrientation) {
+            ScreenOrientationMode.AUTO -> ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            ScreenOrientationMode.PORTRAIT -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            ScreenOrientationMode.LANDSCAPE -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         }
     }
 

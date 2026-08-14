@@ -55,6 +55,7 @@ data class ReaderSettings(
     val pageTurnFeedback: PageTurnFeedback = PageTurnFeedback.VIBRATION,
     val pageTurnStyle: PageTurnStyle = PageTurnStyle.CURL,
     val keepScreenOnInViewer: Boolean = false,
+    val screenOrientation: ScreenOrientationMode = ScreenOrientationMode.AUTO,
     val remoteControlEnabled: Boolean = false,
     val remoteUseDefaultPort: Boolean = true,
     val remoteControlPort: Int = 48484,
@@ -75,6 +76,12 @@ enum class PageTurnStyle {
     NONE,
     CURL,
     SLIDE,
+}
+
+enum class ScreenOrientationMode {
+    AUTO,
+    PORTRAIT,
+    LANDSCAPE,
 }
 
 data class FolderRecord(
