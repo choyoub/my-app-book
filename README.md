@@ -6,7 +6,7 @@
 
 - 앱 이름: 두루마리
 - 패키지명: `com.netice.myapp.durumari`
-- 현재 버전: `0.1.7` (`versionCode` 8)
+- 현재 버전: `0.1.8` (`versionCode` 9)
 - 최소 지원 버전: Android 8.0, API 26
 - 타깃 SDK: API 36
 - 개발 언어: Kotlin

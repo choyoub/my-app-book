@@ -243,6 +243,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        refreshOpenViewerPresentation()
         syncRegisteredFolders()
     }
 
@@ -254,7 +255,7 @@ class MainActivity : Activity() {
 
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
-        if (level >= ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN) {
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND) {
             readerTypefaceCache.clear()
         }
     }
@@ -306,6 +307,7 @@ class MainActivity : Activity() {
         if (shouldSuppressViewerIme()) {
             suppressViewerSoftInput()
         }
+        refreshOpenViewerPresentation()
         val canvas = activeReaderCanvas
         if (canvas != null && canvas.width > 0 && canvas.height > 0) {
             canvas.post {
@@ -446,8 +448,7 @@ class MainActivity : Activity() {
     private fun cancelPendingViewerWork() {
         paginationRequestId += 1
         queuedPageTurnAxis = null
-        remasuringWidthPx = 0
-        remasuringHeightPx = 0
+        clearRemeasureGuard()
         detachViewerFrameWatcher()
     }
 
@@ -455,6 +456,19 @@ class MainActivity : Activity() {
         val watcher = viewerFrameWatcher ?: return
         activeReaderCanvas?.removeOnLayoutChangeListener(watcher)
         viewerFrameWatcher = null
+    }
+
+    private fun refreshOpenViewerPresentation() {
+        val canvas = activeReaderCanvas ?: return
+        if (!isViewerReading()) return
+        val option = readerFontOptions[currentReaderFontIndex(settings)]
+        readerTypefaceCache.remove(option.assetPath)
+        bindViewerCanvas(canvas, DurumariThemes.tokens(settings.theme))
+    }
+
+    private fun clearRemeasureGuard() {
+        remasuringWidthPx = 0
+        remasuringHeightPx = 0
     }
 
     private fun showIntroThenMain() {
@@ -2626,12 +2640,14 @@ class MainActivity : Activity() {
                         activeDocumentText !== text ||
                         settings != settingsSnapshot
                     ) {
+                        if (remasuringWidthPx == widthPx && remasuringHeightPx == heightPx) {
+                            clearRemeasureGuard()
+                        }
                         return@runOnUiThread
                     }
                     val pagination = result.getOrNull()
                     if (pagination == null) {
-                        remasuringWidthPx = 0
-                        remasuringHeightPx = 0
+                        clearRemeasureGuard()
                         Toast.makeText(this, "페이지를 다시 계산하지 못했습니다.", Toast.LENGTH_SHORT).show()
                         return@runOnUiThread
                     }
@@ -2659,6 +2675,7 @@ class MainActivity : Activity() {
         canvas.pageNumberText = "${activePageIndex + 1} / ${activePages.size.coerceAtLeast(1)}"
         canvas.bookmarkActive = isBookmarkActiveForPage(activePageIndex)
         pendingViewerAnchorOffset = null
+        clearRemeasureGuard()
         saveActiveReading()
     }
 
